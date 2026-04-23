@@ -17,6 +17,14 @@ from typing import Optional, Tuple
 from urllib.parse import urlparse
 import yaml
 
+# 导入转换器模块
+from converter import (
+    convert_lark_tables_to_markdown,
+    convert_markdown_tables_to_lark,
+    process_images_for_obsidian,
+    process_images_for_feishu,
+)
+
 # 配置路径
 OBSIDIAN_VAULT_PATH = Path.home() / "Library" / "Mobile Documents" / "iCloud~md~obsidian" / "Documents" / "ObsidianVault"
 SYNC_STATE_PATH = Path.home() / ".hermes" / "obsidian-feishu-sync" / "sync_state.json"
@@ -318,6 +326,14 @@ def sync_from_feishu(url: str, target_path: Optional[str] = None) -> int:
         log(f"获取飞书文档失败: {title}", "ERROR")
         return 1
 
+    # 转換飛書表格為 Markdown 表格
+    log(f"正在转换表格格式...")
+    content = convert_lark_tables_to_markdown(content)
+
+    # 處理圖片：下載到 attachments 目錄
+    log(f"正在处理图片...")
+    content = process_images_for_obsidian(content, doc_id, OBSIDIAN_VAULT_PATH)
+
     # 确定保存路径
     if not target_path:
         # 清理标题中的非法字符
@@ -380,6 +396,14 @@ def sync_to_feishu(obsidian_path: str, create: bool = False, folder_token: Optio
     doc_id = existing_doc_id or find_sync_by_obsidian_path(state, obsidian_path)
 
     if doc_id:
+        # 處理圖片：上傳本地圖片到飛書
+        log(f"正在处理图片...")
+        body = process_images_for_feishu(body, OBSIDIAN_VAULT_PATH, doc_id)
+
+        # 轉換 Markdown 表格為飛書表格
+        log(f"正在转换表格格式...")
+        body = convert_markdown_tables_to_lark(body)
+
         # 更新现有文档
         log(f"正在更新飞书文档: {doc_id}")
         success, err = update_feishu_doc(doc_id, body)
@@ -387,6 +411,14 @@ def sync_to_feishu(obsidian_path: str, create: bool = False, folder_token: Optio
             log(f"更新飞书文档失败: {err}", "ERROR")
             return 1
     elif create:
+        # 創建新文檔時，先處理圖片和表格
+        log(f"正在处理图片...")
+        # 創建時暫時無法上傳圖片（沒有 doc_id），跳過
+        log(f"  注意: 创建新文档时图片上传暂不支持，请在创建后再次同步")
+
+        log(f"正在转换表格格式...")
+        body = convert_markdown_tables_to_lark(body)
+
         # 创建新文档
         log(f"正在创建飞书文档: {title}")
         success, doc_id = create_feishu_doc(title, body, folder_token)
@@ -620,6 +652,10 @@ def sync_all(direction: str = "bidirectional") -> int:
 
                     if current_hash != old_hash:
                         log(f"  Obsidian 有更新，同步到飞书...")
+                        # 处理图片：上传本地图片到飞书
+                        body = process_images_for_feishu(body, OBSIDIAN_VAULT_PATH, doc_id)
+                        # 转换 Markdown 表格为飞书表格
+                        body = convert_markdown_tables_to_lark(body)
                         success, err = update_feishu_doc(doc_id, body)
                         if success:
                             # 更新 frontmatter
@@ -649,6 +685,10 @@ def sync_all(direction: str = "bidirectional") -> int:
 
                     if current_hash != old_hash:
                         log(f"  飞书有更新，同步到 Obsidian...")
+                        # 转换飞书表格为 Markdown 表格
+                        content = convert_lark_tables_to_markdown(content)
+                        # 处理图片：下载到 attachments 目录
+                        content = process_images_for_obsidian(content, doc_id, OBSIDIAN_VAULT_PATH)
                         # 写入带 frontmatter 的内容
                         content_with_fm = write_sync_frontmatter(content, doc_id, title)
                         success, result = write_obsidian_file(obsidian_path, content_with_fm)
