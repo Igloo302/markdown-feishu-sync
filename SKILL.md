@@ -1,21 +1,34 @@
 ---
 name: obsidian-feishu-sync
-description: Obsidian 和飞书文档的双向同步工具
+description: 任意 markdown 文件 ↔ 飞书文档双向同步工具
 triggers:
-  - obsidian.*同步.*飞书
-  - 飞书.*同步.*obsidian
+  - 同步.*飞书
+  - 飞书.*同步
   - sync.*feishu
-  - sync.*obsidian
+  - 同步.*markdown
+  - markdown.*同步
   - sync-from-feishu
   - sync-to-feishu
   - sync-status
   - sync-remove
   - sync-repair
+  - scan.*同步.*状态
 ---
 
-# Obsidian-Feishu Sync Skill
+# Markdown-Feishu Sync Skill
 
-实现 Obsidian 和飞书文档的双向同步。
+实现**任意路径下 markdown 文件**与飞书文档的双向同步。不再限定于 Obsidian vault —— 任何 `.md` 文件均可同步。
+
+## 核心功能
+
+1. **从飞书同步到本地** - 飞书文档 → 本地 `.md` 文件（任意路径）
+2. **从本地同步到飞书** - 本地 `.md` 文件 → 飞书文档（任意路径）
+3. **自动双向同步** - 通过 `sync-all` 一键同步所有已建立关系的文档
+4. **安全的删除处理** - `sync-remove` 只移除同步关系，不删除文件
+5. **路径无关同步** - 通过 frontmatter 存储飞书文档 ID，移动/重命名文件不影响同步关系
+6. **全路径支持** - 支持绝对路径、相对路径（可配置 `--base-dir`）
+7. **向后兼容** - 默认 base_dir 为 Obsidian vault，旧版同步状态自动迁移
+8. **扫描发现** - `scan` 命令扫描目录树中所有含 `feishu_doc_id` frontmatter 的文件
 
 ## 核心功能
 
@@ -27,14 +40,33 @@ triggers:
 6. **表格转换** - 飞书 `<lark-table>` ↔ Markdown 表格自动转换
 7. **图片同步** - 飞书图片下载到 `attachments/` 目录 / 本地图片上传到飞书
 
+## 基础路径（Base Directory）概念
+
+`--base-dir` 是本次扩展的核心特性。它决定了相对路径的解析起点：
+
+- **指定 base-dir**：`--base-dir ~/Projects/thoughts-public`
+- **未指定**：默认使用 Obsidian vault 路径（向后兼容）
+- **环境变量**：可通过 `SYNC_BASE_DIR` 设置
+
+**路径解析规则**：
+- 绝对路径（以 `/` 开头）→ 直接使用
+- 相对路径（如 `Notes/note.md`）→ 解析为 `{base-dir}/{路径}`
+
 ## 命令
+
+### 全局选项
+
+所有命令均支持以下全局选项：
+
+- `--base-dir <目录>`: 设置基础目录（解析相对路径用），默认 Obsidian vault
 
 ### sync-from-feishu
 
-从飞书链接同步文档到 Obsidian Inbox 目录。
+从飞书链接同步文档到本地 markdown 文件。
 
 ```bash
 python ~/.hermes/skills/obsidian-feishu-sync/scripts/sync.py sync-from-feishu <feishu_url>
+python ~/.hermes/skills/obsidian-feishu-sync/scripts/sync.py --base-dir ~/Projects sync-from-feishu <feishu_url>
 ```
 
 参数:
@@ -43,18 +75,25 @@ python ~/.hermes/skills/obsidian-feishu-sync/scripts/sync.py sync-from-feishu <f
   - `https://xxx.larksuite.com/docx/xxx`
 
 选项:
-- `--path <obsidian_path>`: 指定 Obsidian 保存路径（默认: Inbox/文档标题.md）
+- `--path <path>`: 保存路径（绝对或相对路径，默认: {base-dir}/Inbox/文档标题.md）
 
 ### sync-to-feishu
 
-从 Obsidian 同步内容到飞书文档。
+从本地 markdown 文件同步到飞书文档。
 
 ```bash
-python ~/.hermes/skills/obsidian-feishu-sync/scripts/sync.py sync-to-feishu <obsidian_path>
+# 使用绝对路径
+python ~/.hermes/skills/obsidian-feishu-sync/scripts/sync.py sync-to-feishu /Users/igloo/Projects/my-doc.md --create
+
+# 使用相对路径（相对于 base-dir）
+python ~/.hermes/skills/obsidian-feishu-sync/scripts/sync.py sync-to-feishu Notes/meeting.md --create
+
+# 指定 base-dir（在 blog 仓库中同步）
+python ~/.hermes/skills/obsidian-feishu-sync/scripts/sync.py --base-dir ~/Projects/thoughts-public sync-to-feishu posts/new-post.md --create
 ```
 
 参数:
-- `obsidian_path`: Obsidian 文档相对路径（如 `Notes/my-note.md`）
+- `markdown_path`: 本地 markdown 文件路径（绝对路径或相对路径）
 
 选项:
 - `--create`: 如果飞书文档不存在，创建新文档
@@ -66,14 +105,16 @@ python ~/.hermes/skills/obsidian-feishu-sync/scripts/sync.py sync-to-feishu <obs
 
 ```bash
 python ~/.hermes/skills/obsidian-feishu-sync/scripts/sync.py sync-status
+python ~/.hermes/skills/obsidian-feishu-sync/scripts/sync.py --base-dir ~/Projects sync-status
 ```
 
 输出格式:
 ```
-飞书文档                          Obsidian 路径           最后同步时间
-─────────────────────────────────────────────────────────────────────
-项目计划文档                      Inbox/项目计划.md       2024-01-15 10:30
-会议记录                          Notes/会议记录.md       2024-01-14 15:20
+飞书文档 ID           飞书标题      本地文件路径                         最后同步        状态
+──────────────────────────────────────────────────────────────────────────────────────────────
+doxcnXXXXXX           项目计划      ObsidianVault/Inbox/项目计划.md      2024-01-15 10:30 ✓
+doxcnYYYYYY           会议记录      Notes/会议记录.md                   2024-01-14 15:20 ✓
+doxcnZZZZZZ           博客草稿      /Users/igloo/Projects/blog/draft.md  2024-01-14 12:00 ✓
 ```
 
 ### sync-remove
@@ -81,11 +122,15 @@ python ~/.hermes/skills/obsidian-feishu-sync/scripts/sync.py sync-status
 移除同步关系（不删除文档）。
 
 ```bash
-python ~/.hermes/skills/obsidian-feishu-sync/scripts/sync.py sync-remove <identifier>
+# 通过飞书文档 ID 移除
+python ~/.hermes/skills/obsidian-feishu-sync/scripts/sync.py sync-remove doxcnXXXXXX
+
+# 通过本地文件路径移除（支持绝对和相对路径）
+python ~/.hermes/skills/obsidian-feishu-sync/scripts/sync.py sync-remove /Users/igloo/Projects/my-doc.md
 ```
 
 参数:
-- `identifier`: 可以是飞书文档 ID 或 Obsidian 路径
+- `identifier`: 飞书文档 ID 或本地文件路径
 
 ### sync-all
 
@@ -93,6 +138,7 @@ python ~/.hermes/skills/obsidian-feishu-sync/scripts/sync.py sync-remove <identi
 
 ```bash
 python ~/.hermes/skills/obsidian-feishu-sync/scripts/sync.py sync-all
+python ~/.hermes/skills/obsidian-feishu-sync/scripts/sync.py sync-all --direction to-feishu
 ```
 
 选项:
@@ -103,13 +149,32 @@ python ~/.hermes/skills/obsidian-feishu-sync/scripts/sync.py sync-all
 根据 frontmatter 重建 sync_state.json（用于修复断开的同步关系）。
 
 ```bash
+# 扫描 base_dir（默认 Obsidian vault）
 python ~/.hermes/skills/obsidian-feishu-sync/scripts/sync.py sync-repair
+
+# 扫描指定目录
+python ~/.hermes/skills/obsidian-feishu-sync/scripts/sync.py --base-dir ~/Projects/thoughts-public sync-repair
+python ~/.hermes/skills/obsidian-feishu-sync/scripts/sync.py sync-repair ~/Documents/my-md-project
 ```
 
 适用场景：
 - sync_state.json 丢失或损坏
 - 文件被移动/重命名后需要更新路径
 - 手动修改了 frontmatter 后需要同步状态
+- 迁移到新目录后重建同步关系
+
+### scan
+
+扫描目录树中所有包含 `feishu_doc_id` frontmatter 的 markdown 文件，列出发现的同步关系（只读，不修改状态）。
+
+```bash
+# 扫描 base_dir
+python ~/.hermes/skills/obsidian-feishu-sync/scripts/sync.py scan
+
+# 扫描指定目录
+python ~/.hermes/skills/obsidian-feishu-sync/scripts/sync.py scan ~/Documents/my-project
+python ~/.hermes/skills/obsidian-feishu-sync/scripts/sync.py --base-dir ~/Projects scan
+```
 
 ## Frontmatter 同步标识
 
@@ -146,27 +211,54 @@ last_sync: 2024-01-15T10:30:00Z
 
 ## 使用示例
 
-### 示例 1: 从飞书同步新文档
+### 示例 1: 从飞书同步新文档（保存到 Obsidian vault，默认 base_dir）
 
 ```
-用户: 把这个飞书文档同步到 Obsidian: https://xxx.feishu.cn/docx/doxcnXXXXXX
+用户: 把这个飞书文档同步到本地: https://xxx.feishu.cn/docx/doxcnXXXXXX
 助手: [调用 sync-from-feishu 命令]
-已将「项目计划文档」同步到 Obsidian: Inbox/项目计划.md
+已将「项目计划文档」同步到本地: Inbox/项目计划.md
 ```
 
-### 示例 2: 从 Obsidian 同步到飞书
+### 示例 2: 从飞书同步到指定路径（任意目录）
 
 ```
-用户: 把 Obsidian 的 Notes/会议记录.md 同步到飞书
-助手: [调用 sync-to-feishu 命令]
-已将「会议记录」同步到飞书文档
+用户: 把飞书文档同步到我的博客仓库
+助手: [调用 sync-from-feishu --path ~/Projects/thoughts-public/blog/idea.md]
+已将「AI 趋势分析」同步到本地: ~/Projects/thoughts-public/blog/idea.md
 ```
 
-### 示例 3: 查看同步状态
+### 示例 3: 从本地 markdown 同步到飞书
+
+```
+用户: 把 Projects/meeting-notes.md 同步到飞书
+助手: [调用 sync-to-feishu ~/Projects/meeting-notes.md --create]
+已将「会议记录」同步到飞书文档 (doxcnYYYYYY)
+```
+
+### 示例 4: 在项目目录中使用 base-dir
+
+```
+用户: 把博客 repo 里的 posts/draft.md 同步到飞书
+助手: [调用 sync-to-feishu --base-dir ~/Projects/thoughts-public posts/draft.md --create]
+已将「博客草稿」同步到飞书文档 (doxcnZZZZZZ)
+```
+
+### 示例 5: 扫描目录发现同步关系
+
+```
+用户: 看看我的 docs 目录里有哪些文件已经同步到飞书了
+助手: [调用 scan ~/Documents/my-project]
+在 /Users/igloo/Documents/my-project 中找到 3 个同步关系:
+  doxcnAAAAAA             架构设计            docs/arch.md
+  doxcnBBBBBB             API 接口说明        docs/api.md
+  doxcnCCCCCC             部署指南            docs/deploy.md
+```
+
+### 示例 6: 查看所有同步状态
 
 ```
 用户: 查看所有同步关系
-助手: [调用 sync-status 命令]
+助手: [调用 sync-status]
 ```
 
 ### 示例 4: 移除同步关系
@@ -199,9 +291,12 @@ last_sync: 2024-01-15T10:30:00Z
 
 ### 文件路径
 
-- Obsidian vault: `~/Library/Mobile Documents/iCloud~md~obsidian/Documents/ObsidianVault/`
-- 同步状态: `~/.hermes/obsidian-feishu-sync/sync_state.json`
-- Skill 目录: `~/.hermes/skills/obsidian-feishu-sync/`
+- **默认 base_dir（向后兼容）**: `~/Library/Mobile Documents/iCloud~md~obsidian/Documents/ObsidianVault/`
+- **自定义 base_dir**: 通过 `--base-dir` 参数或 `SYNC_BASE_DIR` 环境变量设置
+- **绝对路径**: 任何以 `/` 开头的路径直接使用，不依赖 base_dir
+- **同步状态存储**: `~/.hermes/obsidian-feishu-sync/sync_state.json`
+- **Skill 目录**: `~/.hermes/skills/obsidian-feishu-sync/`
+- **附件目录**: `{base-dir}/attachments/{doc_id}/`（飞书下载的图片等）
 
 ## 注意事项
 
