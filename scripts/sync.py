@@ -192,9 +192,9 @@ def get_feishu_doc_content(doc_id: str) -> tuple[bool, str, str]:
 
 def create_feishu_doc(title: str, content: str, folder_token: Optional[str] = None) -> tuple[bool, str]:
     """创建飞书文档，返回 (成功, 文档ID)"""
-    args = ["doc", "create", "--title", title]
+    args = ["docs", "+create", "--title", title]
     if folder_token:
-        args.extend(["--folder", folder_token])
+        args.extend(["--folder-token", folder_token])
 
     success, output = run_lark_command(args)
     if not success:
@@ -222,17 +222,20 @@ def create_feishu_doc(title: str, content: str, folder_token: Optional[str] = No
 def update_feishu_doc(doc_id: str, content: str) -> tuple[bool, str]:
     """更新飞书文档内容"""
     import tempfile
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, encoding="utf-8") as f:
+    # 在当前工作目录下创建临时文件以避开 lark-cli 对绝对路径的安全限制
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", dir=".", delete=False, encoding="utf-8") as f:
         f.write(content)
         temp_path = f.name
 
+    rel_path = "./" + os.path.basename(temp_path)
     try:
         success, output = run_lark_command([
-            "doc", "update", doc_id, "--file", temp_path, "--format", "markdown"
+            "docs", "+update", "--doc", doc_id, "--mode", "overwrite", "--markdown", "@" + rel_path
         ])
         return success, output
     finally:
-        os.unlink(temp_path)
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
 
 
 # ============== 文件读写（支持任意路径） ==============

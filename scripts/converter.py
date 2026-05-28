@@ -82,6 +82,17 @@ def lark_table_to_markdown(lark_table_html: str) -> str:
     
     if not rows:
         return ""
+        
+    # 处理单元格内部的换行，用 <br /> 替代，以符合 Markdown 表格单行要求
+    cleaned_rows = []
+    for row in rows:
+        cleaned_row = []
+        for cell in row:
+            lines = [line.strip() for line in cell.split("\n")]
+            cleaned_cell = "<br />".join([l for l in lines if l])
+            cleaned_row.append(cleaned_cell)
+        cleaned_rows.append(cleaned_row)
+    rows = cleaned_rows
     
     # 计算每列最大宽度
     col_count = max(len(row) for row in rows)
@@ -141,7 +152,9 @@ def markdown_table_to_lark_table(md_table: str) -> str:
         html += "  <lark-tr>\n"
         padded_row = row + [""] * (col_count - len(row))
         for cell in padded_row:
-            html += f"    <lark-td>\n      {cell}\n    </lark-td>\n"
+            # 将 Markdown 的 <br /> 标签转回物理换行，使飞书端渲染自然换行
+            feishu_cell = cell.replace("<br />", "\n").replace("<br/>", "\n").replace("<br>", "\n")
+            html += f"    <lark-td>\n      {feishu_cell}\n    </lark-td>\n"
         html += "  </lark-tr>\n"
     
     html += "</lark-table>"
