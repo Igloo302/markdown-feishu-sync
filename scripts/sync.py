@@ -22,6 +22,10 @@ from converter import (
     convert_markdown_tables_to_lark,
     process_images_for_obsidian,
     process_images_for_feishu,
+    convert_callouts_to_markdown_alerts,
+    convert_markdown_alerts_to_callouts,
+    process_whiteboards_for_obsidian,
+    process_whiteboards_for_feishu,
 )
 
 # 默认配置
@@ -230,7 +234,7 @@ def update_feishu_doc(doc_id: str, content: str) -> tuple[bool, str]:
     rel_path = "./" + os.path.basename(temp_path)
     try:
         success, output = run_lark_command([
-            "docs", "+update", "--doc", doc_id, "--mode", "overwrite", "--markdown", "@" + rel_path
+            "docs", "+update", "--api-version", "v2", "--doc", doc_id, "--command", "overwrite", "--doc-format", "markdown", "--content", "@" + rel_path
         ])
         return success, output
     finally:
@@ -404,13 +408,19 @@ def sync_from_feishu(url: str, target_path: Optional[str] = None) -> int:
         log(f"获取飞书文档失败: {title}", "ERROR")
         return 1
 
+    raw_feishu_hash = compute_hash(content)
+
     # 转换飞书表格为 Markdown 表格
     log(f"正在转换表格格式...")
     content = convert_lark_tables_to_markdown(content)
 
-    # 处理图片：下载到 attachments 目录
-    log(f"正在处理图片...")
-    content = process_images_for_obsidian(content, doc_id, get_base_dir())
+    # 转换飞书高亮块为 Markdown Alerts
+    log(f"正在转换高亮块格式...")
+    content = convert_callouts_to_markdown_alerts(content)
+
+    # 处理画板/Mermaid 图表
+    log(f"正在处理画板图表...")
+    content = process_whiteboards_for_obsidian(content)
 
     # 解析或生成目标路径
     if target_path:
@@ -422,6 +432,10 @@ def sync_from_feishu(url: str, target_path: Optional[str] = None) -> int:
     # 确保以 .md 结尾
     if target.suffix != ".md":
         target = target.with_suffix(".md")
+
+    # 处理图片：下载到 attachments 目录 (使用相对于 markdown 目标路径的 parent 目录，以支持正确相对解析)
+    log(f"正在处理图片...")
+    content = process_images_for_obsidian(content, doc_id, target.parent)
 
     # 写入 frontmatter
     content_with_frontmatter = write_sync_frontmatter(content, doc_id, title)
@@ -439,7 +453,7 @@ def sync_from_feishu(url: str, target_path: Optional[str] = None) -> int:
         "feishu_title": title,
         "last_sync_time": datetime.now(timezone.utc).isoformat(),
         "obsidian_hash": compute_hash(content_with_frontmatter),
-        "feishu_hash": compute_hash(content),
+        "feishu_hash": raw_feishu_hash,
         "sync_direction": "bidirectional"
     }
     save_sync_state(state)
@@ -477,28 +491,45 @@ def sync_to_feishu(file_path: str, create: bool = False, folder_token: Optional[
     doc_id = existing_doc_id or find_sync_by_obsidian_path(state, str(path))
 
     if doc_id:
-        # 处理图片：上传本地图片到飞书
-        log(f"正在处理图片...")
-        body = process_images_for_feishu(body, get_base_dir(), doc_id)
+        # 处理画板/Mermaid 图表
+        log(f"正在处理画板图表...")
+        feishu_body = process_whiteboards_for_feishu(body)
 
-        # 转换 Markdown 表格为飞书表格
-        log(f"正在转换表格格式...")
-        body = convert_markdown_tables_to_lark(body)
+        # 处理图片：上传本地图片到飞书 (使用当前 markdown 所在目录作为图片根路径)
+        log(f"正在处理图片...")
+        feishu_body = process_images_for_feishu(feishu_body, path.parent, doc_id)
+
+        # 转换 Markdown Alerts 为飞书高亮块
+        log(f"正在转换高亮块格式...")
+        feishu_body = convert_markdown_alerts_to_callouts(feishu_body)
+
+        # 转换 Markdown 表格为飞书表格 (v2 API 已原生支持 Markdown 表格，此处不再转换为 HTML)
+        # log(f"正在转换表格格式...")
+        # feishu_body = convert_markdown_tables_to_lark(feishu_body)
 
         log(f"正在更新飞书文档: {doc_id}")
-        success, err = update_feishu_doc(doc_id, body)
+        success, err = update_feishu_doc(doc_id, feishu_body)
         if not success:
             log(f"更新飞书文档失败: {err}", "ERROR")
             return 1
     elif create:
         log(f"正在处理图片...")
         log(f"  注意: 创建新文档时图片上传暂不支持，请在创建后再次同步")
+        feishu_body = body
 
-        log(f"正在转换表格格式...")
-        body = convert_markdown_tables_to_lark(body)
+        # 处理画板/Mermaid 图表
+        log(f"正在处理画板图表...")
+        feishu_body = process_whiteboards_for_feishu(feishu_body)
+
+        # 转换 Markdown Alerts 为飞书高亮块
+        log(f"正在转换高亮块格式...")
+        feishu_body = convert_markdown_alerts_to_callouts(feishu_body)
+
+        # log(f"正在转换表格格式...")
+        # feishu_body = convert_markdown_tables_to_lark(feishu_body)
 
         log(f"正在创建飞书文档: {title}")
-        success, doc_id = create_feishu_doc(title, body, folder_token)
+        success, doc_id = create_feishu_doc(title, feishu_body, folder_token)
         if not success:
             log(f"创建飞书文档失败: {doc_id}", "ERROR")
             return 1
@@ -506,7 +537,7 @@ def sync_to_feishu(file_path: str, create: bool = False, folder_token: Optional[
         log(f"未找到同步关系，使用 --create 创建新文档，或先通过 sync-from-feishu 同步", "ERROR")
         return 1
 
-    # 更新本地文件的 frontmatter
+    # 更新本地文件的 frontmatter (保留本地图片路径!)
     content_with_frontmatter = write_sync_frontmatter(body, doc_id, title)
     success, result = write_markdown_file(path, content_with_frontmatter)
     if not success:
@@ -518,7 +549,7 @@ def sync_to_feishu(file_path: str, create: bool = False, folder_token: Optional[
         "feishu_title": title,
         "last_sync_time": datetime.now(timezone.utc).isoformat(),
         "obsidian_hash": compute_hash(content_with_frontmatter),
-        "feishu_hash": compute_hash(body),
+        "feishu_hash": compute_hash(feishu_body),
         "sync_direction": "bidirectional"
     }
     save_sync_state(state)
@@ -646,16 +677,27 @@ def sync_all(direction: str = "bidirectional") -> int:
             if direction in ["to-feishu", "bidirectional"]:
                 success, content = read_markdown_file(path)
                 if success:
-                    _, body = parse_frontmatter(content)
-                    current_hash = compute_hash(body)
+                    current_hash = compute_hash(content)
                     old_hash = state.get(doc_id, {}).get("obsidian_hash", "")
 
                     if current_hash != old_hash:
                         log(f"  本地有更新，同步到飞书...")
-                        body = process_images_for_feishu(body, get_base_dir(), doc_id)
-                        body = convert_markdown_tables_to_lark(body)
-                        success, err = update_feishu_doc(doc_id, body)
+                        _, body = parse_frontmatter(content)
+                        
+                        # 处理画板/Mermaid 图表
+                        log(f"正在处理画板图表...")
+                        feishu_body = process_whiteboards_for_feishu(body)
+                        
+                        feishu_body = process_images_for_feishu(feishu_body, path.parent, doc_id)
+                        
+                        # 转换 Markdown Alerts 为飞书高亮块
+                        log(f"正在转换高亮块格式...")
+                        feishu_body = convert_markdown_alerts_to_callouts(feishu_body)
+                        
+                        # body = convert_markdown_tables_to_lark(body)
+                        success, err = update_feishu_doc(doc_id, feishu_body)
                         if success:
+                            # Write back the original local body (with local paths) to local file
                             content_with_fm = write_sync_frontmatter(body, doc_id, feishu_title)
                             write_markdown_file(path, content_with_fm)
                             state[doc_id] = {
@@ -663,7 +705,7 @@ def sync_all(direction: str = "bidirectional") -> int:
                                 "feishu_title": feishu_title,
                                 "last_sync_time": datetime.now(timezone.utc).isoformat(),
                                 "obsidian_hash": compute_hash(content_with_fm),
-                                "feishu_hash": current_hash,
+                                "feishu_hash": compute_hash(feishu_body),
                                 "sync_direction": "bidirectional"
                             }
                             success_count += 1
@@ -681,7 +723,16 @@ def sync_all(direction: str = "bidirectional") -> int:
                     if current_hash != old_hash:
                         log(f"  飞书有更新，同步到本地...")
                         content = convert_lark_tables_to_markdown(content)
-                        content = process_images_for_obsidian(content, doc_id, get_base_dir())
+                        
+                        # 转换飞书高亮块为 Markdown Alerts
+                        log(f"正在转换高亮块格式...")
+                        content = convert_callouts_to_markdown_alerts(content)
+                        
+                        # 处理画板/Mermaid 图表
+                        log(f"正在处理画板图表...")
+                        content = process_whiteboards_for_obsidian(content)
+                        
+                        content = process_images_for_obsidian(content, doc_id, path.parent)
                         content_with_fm = write_sync_frontmatter(content, doc_id, title)
                         success, result = write_markdown_file(path, content_with_fm)
                         if success:

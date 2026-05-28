@@ -259,6 +259,50 @@ def extract_image_urls(content: str) -> List[Tuple[str, str, str]]:
     return matches
 
 
+def download_feishu_media(token: str, save_dir: Path) -> Optional[Path]:
+    """
+    使用 lark-cli docs +media-download 下载飞书媒体文件并返回本地路径
+    """
+    import subprocess
+    import json
+    import os
+    save_dir.mkdir(parents=True, exist_ok=True)
+    save_path = save_dir / f"img_{token}.png"
+    
+    if save_path.exists():
+        return save_path
+        
+    # lark-cli 要求输出路径为当前目录下的相对路径
+    rel_path = os.path.relpath(save_path, os.getcwd())
+    if not rel_path.startswith("."):
+        rel_path = "./" + rel_path
+        
+    try:
+        cmd = ["lark-cli", "docs", "+media-download", "--token", token, "--output", rel_path, "--overwrite"]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if proc.returncode == 0:
+            output = proc.stdout.strip()
+            try:
+                json_start = output.find("{")
+                if json_start != -1:
+                    json_str = output[json_start:]
+                    parsed = json.loads(json_str)
+                    if parsed.get("ok"):
+                        content_type = parsed.get("data", {}).get("content_type", "")
+                        if "jpeg" in content_type or "jpg" in content_type:
+                            new_path = save_dir / f"img_{token}.jpg"
+                            if save_path.exists():
+                                save_path.rename(new_path)
+                            return new_path
+                        return save_path
+            except Exception:
+                pass
+            return save_path
+    except Exception as e:
+        print(f"[WARN] 无法通过 lark-cli 下载媒体 {token}: {e}")
+    return None
+
+
 def process_images_for_obsidian(
     content: str, 
     doc_id: str,
@@ -277,35 +321,116 @@ def process_images_for_obsidian(
     Returns:
         处理后的内容（图片链接替换为本地路径）
     """
-    # 提取图片 URL
-    images = extract_image_urls(content)
-    
-    if not images:
-        return content
-    
-    # 创建 attachments 目录
     attachments_dir = obsidian_vault / "attachments" / doc_id
-    
     result = content
+    
+    # 1. 提取并处理 HTML 格式的 <image token="..." .../> 标签
+    image_tag_pattern = r'<image\s+token="([a-zA-Z0-9_-]+)"[^>]*>(?:</image>)?'
+    for match in re.finditer(image_tag_pattern, content):
+        full_match = match.group(0)
+        token = match.group(1)
+        local_path = download_feishu_media(token, attachments_dir)
+        if local_path:
+            relative_path = f"attachments/{doc_id}/{local_path.name}"
+            new_img = f"![图片]({relative_path})"
+            result = result.replace(full_match, new_img)
+            
+    # 2. 提取并处理 Markdown 格式的 ![alt](url) 标签
+    images = extract_image_urls(result)
     for full_match, alt_text, url in images:
-        # 判断是否是飞书图片
-        if "feishu.cn" in url or "larksuite.com" in url:
-            # 下载图片
+        if url.startswith("attachments/"):
+            continue
+            
+        if url.startswith("http"):
             local_path = download_image(url, attachments_dir)
             if local_path:
-                # 替换为 Obsidian 相对路径
                 relative_path = f"attachments/{doc_id}/{local_path.name}"
                 new_img = f"![{alt_text}]({relative_path})"
                 result = result.replace(full_match, new_img)
         else:
-            # 非飞书图片，尝试直接下载
-            local_path = download_image(url, attachments_dir)
-            if local_path:
-                relative_path = f"attachments/{doc_id}/{local_path.name}"
-                new_img = f"![{alt_text}]({relative_path})"
-                result = result.replace(full_match, new_img)
+            # 如果看起来是飞书图片 Token (字母数字下滑线且不含点和斜杠)
+            if re.match(r"^[a-zA-Z0-9_-]+$", url):
+                local_path = download_feishu_media(url, attachments_dir)
+                if local_path:
+                    relative_path = f"attachments/{doc_id}/{local_path.name}"
+                    new_img = f"![{alt_text}]({relative_path})"
+                    result = result.replace(full_match, new_img)
+            else:
+                # 尝试直接使用 http 下载
+                local_path = download_image(url, attachments_dir)
+                if local_path:
+                    relative_path = f"attachments/{doc_id}/{local_path.name}"
+                    new_img = f"![{alt_text}]({relative_path})"
+                    result = result.replace(full_match, new_img)
     
     return result
+
+
+def get_image_size(file_path: Path) -> Optional[Tuple[int, int]]:
+    """读取 PNG, JPEG, GIF 图片尺寸"""
+    import struct
+    if not file_path.exists():
+        return None
+    try:
+        with open(file_path, "rb") as f:
+            head = f.read(24)
+            # PNG
+            if len(head) >= 24 and head.startswith(b"\x89PNG\r\n\x1a\n"):
+                w, h = struct.unpack(">II", head[16:24])
+                return int(w), int(h)
+            # GIF
+            elif len(head) >= 10 and head.startswith((b"GIF87a", b"GIF89a")):
+                w, h = struct.unpack("<HH", head[6:10])
+                return int(w), int(h)
+            # JPEG
+            elif head.startswith(b"\xff\xd8"):
+                f.seek(0)
+                # Read SOI (2 bytes)
+                f.read(2)
+                while True:
+                    marker = f.read(2)
+                    if len(marker) < 2:
+                        break
+                    # Check marker validity
+                    if marker[0] != 0xff:
+                        # Scan for next 0xff
+                        while len(marker) > 0 and marker[0] != 0xff:
+                            marker = f.read(1)
+                        if len(marker) == 0:
+                            break
+                        # Read the marker type byte
+                        marker_type = f.read(1)
+                        if len(marker_type) == 0:
+                            break
+                        marker = b"\xff" + marker_type
+                    
+                    # If marker is SOS (Start of Scan) \xff\xda or EOI \xff\xd9, we stop scanning
+                    if marker in (b"\xff\xda", b"\xff\xd9"):
+                        break
+                    
+                    # Read length
+                    len_bytes = f.read(2)
+                    if len_bytes < 2:
+                        break
+                    length = struct.unpack(">H", len_bytes)[0]
+                    
+                    # SOF0 - SOF15 markers (except SOF4, SOF8, SOF12)
+                    if marker[1] in [0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf]:
+                        # Read precision (1 byte)
+                        f.read(1)
+                        h_bytes = f.read(2)
+                        w_bytes = f.read(2)
+                        if len(h_bytes) < 2 or len(w_bytes) < 2:
+                            break
+                        h = struct.unpack(">H", h_bytes)[0]
+                        w = struct.unpack(">H", w_bytes)[0]
+                        return int(w), int(h)
+                    else:
+                        # Skip this segment
+                        f.read(length - 2)
+    except Exception as e:
+        print(f"[WARN] 获取图片尺寸失败 {file_path}: {e}")
+    return None
 
 
 def process_images_for_feishu(
@@ -349,29 +474,68 @@ def process_images_for_feishu(
         
         # 上传到飞书（使用 lark-cli docs +media-insert）
         try:
+            # lark-cli 要求文件路径为当前目录下的相对路径
+            rel_path = os.path.relpath(local_path, os.getcwd())
+            if not rel_path.startswith("."):
+                rel_path = "./" + rel_path
+            
             # 先上传图片获取 token
-            cmd = ["lark-cli", "docs", "+media-insert", "--doc", doc_id, str(local_path)]
+            cmd = ["lark-cli", "docs", "+media-insert", "--doc", doc_id, "--file", rel_path]
+            size = get_image_size(local_path)
+            if size:
+                width, height = size
+                cmd.extend(["--width", str(width), "--height", str(height)])
+            
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
             
             if proc.returncode == 0:
                 # 解析输出获取图片 URL
-                # lark-cli 返回格式可能是 JSON 或纯文本
+                # lark-cli 返回格式可能是 JSON 或纯文本，并且可能混有调试日志
                 output = proc.stdout.strip()
                 
                 # 尝试解析 JSON
                 try:
-                    data = json.loads(output)
-                    if "file_token" in data:
-                        feishu_url = f"https://open.feishu.cn/open-apis/drive/v1/medias/{data['file_token']}/download"
-                        new_img = f"![{alt_text}]({feishu_url})"
+                    json_start = output.find("{")
+                    if json_start != -1:
+                        json_str = output[json_start:]
+                        parsed = json.loads(json_str)
+                        file_token = None
+                        if "file_token" in parsed:
+                            file_token = parsed["file_token"]
+                        elif "data" in parsed and isinstance(parsed["data"], dict) and "file_token" in parsed["data"]:
+                            file_token = parsed["data"]["file_token"]
+                        
+                        if file_token:
+                            size = get_image_size(local_path)
+                            if size:
+                                width, height = size
+                                new_img = f'<img src="{file_token}" width="{width}" height="{height}" />'
+                            else:
+                                new_img = f'<img src="{file_token}" />'
+                            result = result.replace(full_match, new_img)
+                except Exception:
+                    # 容错：使用正则直接匹配 file_token 或 URL
+                    token_match = re.search(r'"file_token"\s*:\s*"([a-zA-Z0-9]+)"', output)
+                    if token_match:
+                        file_token = token_match.group(1)
+                        size = get_image_size(local_path)
+                        if size:
+                            width, height = size
+                            new_img = f'<img src="{file_token}" width="{width}" height="{height}" />'
+                        else:
+                            new_img = f'<img src="{file_token}" />'
                         result = result.replace(full_match, new_img)
-                except json.JSONDecodeError:
-                    # 纯文本输出，尝试提取 URL
-                    url_match = re.search(r'https://[^\s]+', output)
-                    if url_match:
-                        feishu_url = url_match.group(0)
-                        new_img = f"![{alt_text}]({feishu_url})"
-                        result = result.replace(full_match, new_img)
+                    else:
+                        url_match = re.search(r'https://[^\s]+', output)
+                        if url_match:
+                            feishu_url = url_match.group(0).strip("'\")")
+                            size = get_image_size(local_path)
+                            if size:
+                                width, height = size
+                                new_img = f'<img src="{feishu_url}" width="{width}" height="{height}" />'
+                            else:
+                                new_img = f'<img src="{feishu_url}" />'
+                            result = result.replace(full_match, new_img)
         except Exception as e:
             print(f"[WARN] 上传图片到飞书失败: {local_path} - {e}")
     
@@ -504,6 +668,178 @@ def extract_title(markdown: str) -> Optional[str]:
 def sanitize_filename(name: str) -> str:
     """清理文件名中的非法字符"""
     return re.sub(r'[<>:"/\\|?*]', '_', name)
+
+
+def convert_callouts_to_markdown_alerts(content: str) -> str:
+    """将飞书 HTML 格式的 callout 块转换为 GitHub-style markdown alerts"""
+    pattern = r'<callout\s+emoji="([^"]+)"[^>]*>(.*?)</callout>'
+    
+    def replace_callout(match):
+        emoji = match.group(1)
+        body = match.group(2)
+        
+        # 默认使用 IMPORTANT
+        alert_type = "IMPORTANT"
+        if emoji in ("ℹ️", "info", "note"):
+            alert_type = "NOTE"
+        elif emoji in ("💡", "tip"):
+            alert_type = "IMPORTANT"  # 用户要求灯泡映射为 IMPORTANT
+        elif emoji in ("⚠️", "warning"):
+            alert_type = "WARNING"
+        elif emoji in ("🚨", "danger", "caution"):
+            alert_type = "CAUTION"
+            
+        # 格式化每行，并在类型行后加上空行
+        body = body.strip("\n")
+        lines = body.split("\n")
+        
+        formatted_lines = [f"> [!{alert_type}]", ">"]
+        for line in lines:
+            if line.strip():
+                formatted_lines.append(f"> {line}")
+            else:
+                formatted_lines.append(">")
+                
+        return "\n".join(formatted_lines)
+        
+    return re.sub(pattern, replace_callout, content, flags=re.DOTALL)
+
+
+def convert_markdown_alerts_to_callouts(content: str) -> str:
+    """将 GitHub-style markdown alerts 转换为飞书 HTML 格式的 callout 块"""
+    lines = content.split("\n")
+    new_lines = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        match = re.match(r"^>\s*\[\!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$", line.strip())
+        if match:
+            alert_type = match.group(1)
+            emoji = "💡"
+            if alert_type == "NOTE":
+                emoji = "ℹ️"
+            elif alert_type == "TIP":
+                emoji = "💡"
+            elif alert_type == "IMPORTANT":
+                emoji = "💡"
+            elif alert_type == "WARNING":
+                emoji = "⚠️"
+            elif alert_type == "CAUTION":
+                emoji = "🚨"
+                
+            callout_lines = []
+            i += 1
+            while i < len(lines):
+                next_line = lines[i]
+                if next_line.startswith(">"):
+                    content_line = next_line[1:]
+                    if content_line.startswith(" "):
+                        content_line = content_line[1:]
+                    callout_lines.append(content_line)
+                    i += 1
+                else:
+                    break
+            
+            while callout_lines and not callout_lines[0].strip():
+                callout_lines.pop(0)
+            while callout_lines and not callout_lines[-1].strip():
+                callout_lines.pop()
+                
+            callout_content = "\n".join(callout_lines)
+            new_lines.append(f'<callout emoji="{emoji}" background-color="light-gray" border-color="gray">\n\n{callout_content}\n\n</callout>')
+        else:
+            new_lines.append(line)
+            i += 1
+            
+    return "\n".join(new_lines)
+
+
+def get_feishu_whiteboard_mermaid(token: str) -> tuple[bool, str]:
+    """获取飞书画板中的 Mermaid 代码"""
+    import subprocess
+    import json
+    try:
+        cmd = ["lark-cli", "whiteboard", "+query", "--whiteboard-token", token, "--output_as", "code", "--as", "user"]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode == 0:
+            output = result.stdout.strip()
+            json_start = output.find("{")
+            if json_start != -1:
+                parsed = json.loads(output[json_start:])
+                if parsed.get("ok"):
+                    data = parsed.get("data", {})
+                    if data.get("syntax_type") == "mermaid":
+                        return True, data.get("code", "")
+            return False, "无法解析画板代码输出"
+        return False, result.stderr
+    except Exception as e:
+        return False, str(e)
+
+
+def update_feishu_whiteboard_mermaid(token: str, mermaid_code: str) -> tuple[bool, str]:
+    """更新飞书画板内容为 Mermaid 代码"""
+    import subprocess
+    import tempfile
+    import os
+    
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".mmd", dir=".", delete=False, encoding="utf-8") as f:
+        f.write(mermaid_code)
+        temp_path = f.name
+        
+    rel_path = "./" + os.path.basename(temp_path)
+    try:
+        cmd = ["lark-cli", "whiteboard", "+update", "--whiteboard-token", token, "--input_format", "mermaid", "--source", "@" + rel_path, "--overwrite", "--as", "user"]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode == 0:
+            return True, result.stdout
+        return False, result.stderr
+    except Exception as e:
+        return False, str(e)
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
+def process_whiteboards_for_obsidian(content: str) -> str:
+    """将 <whiteboard token="xxx"/> 标签转换为 ```mermaid ``` 代码块"""
+    whiteboard_pattern = r'<whiteboard\s+token="([a-zA-Z0-9_-]+)"[^>]*>(?:</whiteboard>)?'
+    result = content
+    for match in re.finditer(whiteboard_pattern, content):
+        full_match = match.group(0)
+        token = match.group(1)
+        
+        print(f"[INFO] 正在获取画板 {token} 的 Mermaid 代码...")
+        success, code = get_feishu_whiteboard_mermaid(token)
+        if success:
+            new_block = f"```mermaid\n%% whiteboard_token: {token}\n{code}\n```"
+            result = result.replace(full_match, new_block)
+        else:
+            print(f"[WARN] 无法获取画板 {token} 的 Mermaid 代码: {code}")
+            
+    return result
+
+
+def process_whiteboards_for_feishu(content: str) -> str:
+    """将 ```mermaid ... ``` 代码块中的画板上传并还原为 <whiteboard token="xxx"/> 标签"""
+    pattern = r'```mermaid\s*\n%%\s*whiteboard_token:\s*([a-zA-Z0-9_-]+)\s*\n(.*?)\n```'
+    
+    result = content
+    for match in re.finditer(pattern, content, flags=re.DOTALL):
+        full_match = match.group(0)
+        token = match.group(1)
+        mermaid_code = match.group(2)
+        
+        mermaid_code = mermaid_code.strip("\n")
+        
+        print(f"[INFO] 正在更新画板 {token}...")
+        success, err = update_feishu_whiteboard_mermaid(token, mermaid_code)
+        if success:
+            new_tag = f'<whiteboard token="{token}"/>'
+            result = result.replace(full_match, new_tag)
+        else:
+            print(f"[WARN] 无法更新画板 {token}: {err}")
+            
+    return result
 
 
 if __name__ == "__main__":

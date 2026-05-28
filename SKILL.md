@@ -296,11 +296,15 @@ last_sync: 2024-01-15T10:30:00Z
 - **绝对路径**: 任何以 `/` 开头的路径直接使用，不依赖 base_dir
 - **同步状态存储**: `~/.hermes/obsidian-feishu-sync/sync_state.json`
 - **Skill 目录**: `~/.hermes/skills/obsidian-feishu-sync/`
-- **附件目录**: `{base-dir}/attachments/{doc_id}/`（飞书下载的图片等）
+- **附件目录**: `attachments/{doc_id}/`（位于 Markdown 文件同级目录下，以确保 Markdown 相对路径引用的正确渲染与预览，支持子目录结构）
 
 ## 注意事项
 
 1. 需要先配置飞书 CLI 认证（`lark-cli auth login`）
 2. 飞书文档需要 API 访问权限
 3. 大文档同步可能需要较长时间
-4. 图片和附件会单独处理并保持引用
+4. **图片和附件的处理**：
+   - 飞书下载的图片及媒体文件使用 `lark-cli docs +media-download` 获取，并以标准 Markdown 语法 `![图片](attachments/{doc_id}/img_{token}.png)` 插入本地文档。
+   - `lark-cli` 要求 `--output` 路径必须为当前工作目录下的相对路径，脚本在执行下载时会自动将本地绝对路径转换为相对于当前工作目录的相对路径，以避免触发 Lark CLI 的安全检查报错。
+   - 本地图片同步上传至飞书使用 `lark-cli docs +media-insert` 并动态绑定到文档块，本地相对图片路径会被重写为飞书图片 Token 结构。
+
