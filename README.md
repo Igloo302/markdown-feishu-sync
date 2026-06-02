@@ -29,6 +29,8 @@
 - ✅ **Base Directory** - `--base-dir` 参数切换工作目录，省去写绝对路径的麻烦
 - ✅ **表格转换** - 飞书表格 ↔ Markdown 表格自动转换
 - ✅ **图片同步** - 飞书图片下载到 `attachments/` / 本地图片上传到飞书
+- ✅ **链接/提及转换** - 自动将飞书 `<mention-doc>` 或 `<cite>` 提及标签转换为标准 Markdown 超链接，防止渲染错误
+- ✅ **加粗冒号修正** - 自动将加粗语法中被包裹在内部的冒号（中英文）移至外部（如 `**加粗**：`），修复飞书端无法加粗的排版漏洞
 - ✅ **安全删除** - 同步关系移除不删除文件，两端互不影响
 - ✅ **冲突检测** - 双向同步时自动检测冲突，智能合并
 - ✅ **状态可视** - 查看所有同步关系，文件存在与否一目了然
@@ -117,15 +119,17 @@ python sync.py sync-repair ~/Documents  # 扫描指定目录重建
 2. 调用 lark-cli 获取文档内容
 3. **转换表格**：`<lark-table>` → Markdown 表格
 4. **下载图片**：飞书图片 → `attachments/<doc_id>/`
-5. 写入文件，添加 frontmatter 标识
+5. **链接转换**：自动将飞书特有的 `<cite>` 与 `<mention-doc>` 提及块转换为标准 Markdown 超链接
+6. 写入文件，添加 frontmatter 标识
 
 ### 本地 → 飞书
 
 1. 读取文件，提取 frontmatter 中的飞书文档 ID
 2. **上传图片**：本地图片 → 飞书云存储
 3. **转换表格**：Markdown 表格 → `<lark-table>`
-4. 调用 lark-cli 更新飞书文档
-5. 更新 frontmatter 时间戳
+4. **排版修正**：转换 `<mention-doc>` 标签为 Markdown 链接，并将加粗符号内部包裹的冒号（中英文）移至外部以保加粗生效
+5. 调用 lark-cli 更新飞书文档
+6. 更新 frontmatter 时间戳
 
 ## Frontmatter 格式
 
