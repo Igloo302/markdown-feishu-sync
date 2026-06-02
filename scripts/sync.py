@@ -26,6 +26,8 @@ from converter import (
     convert_markdown_alerts_to_callouts,
     process_whiteboards_for_obsidian,
     process_whiteboards_for_feishu,
+    convert_mentions_to_markdown_links,
+    fix_bold_colons,
 )
 
 # 默认配置
@@ -418,6 +420,9 @@ def sync_from_feishu(url: str, target_path: Optional[str] = None) -> int:
     log(f"正在转换高亮块格式...")
     content = convert_callouts_to_markdown_alerts(content)
 
+    # 转换 cite/mention-doc 标签为 Markdown 超链接
+    content = convert_mentions_to_markdown_links(content)
+
     # 处理画板/Mermaid 图表
     log(f"正在处理画板图表...")
     content = process_whiteboards_for_obsidian(content)
@@ -503,6 +508,10 @@ def sync_to_feishu(file_path: str, create: bool = False, folder_token: Optional[
         log(f"正在转换高亮块格式...")
         feishu_body = convert_markdown_alerts_to_callouts(feishu_body)
 
+        # 预处理：转换 cite/mention-doc 为 Markdown 超链接，并修复加粗冒号
+        feishu_body = convert_mentions_to_markdown_links(feishu_body)
+        feishu_body = fix_bold_colons(feishu_body)
+
         # 转换 Markdown 表格为飞书表格 (v2 API 已原生支持 Markdown 表格，此处不再转换为 HTML)
         # log(f"正在转换表格格式...")
         # feishu_body = convert_markdown_tables_to_lark(feishu_body)
@@ -524,6 +533,10 @@ def sync_to_feishu(file_path: str, create: bool = False, folder_token: Optional[
         # 转换 Markdown Alerts 为飞书高亮块
         log(f"正在转换高亮块格式...")
         feishu_body = convert_markdown_alerts_to_callouts(feishu_body)
+
+        # 预处理：转换 cite/mention-doc 为 Markdown 超链接，并修复加粗冒号
+        feishu_body = convert_mentions_to_markdown_links(feishu_body)
+        feishu_body = fix_bold_colons(feishu_body)
 
         # log(f"正在转换表格格式...")
         # feishu_body = convert_markdown_tables_to_lark(feishu_body)
@@ -693,6 +706,10 @@ def sync_all(direction: str = "bidirectional") -> int:
                         # 转换 Markdown Alerts 为飞书高亮块
                         log(f"正在转换高亮块格式...")
                         feishu_body = convert_markdown_alerts_to_callouts(feishu_body)
+
+                        # 预处理：转换 cite/mention-doc 为 Markdown 超链接，并修复加粗冒号
+                        feishu_body = convert_mentions_to_markdown_links(feishu_body)
+                        feishu_body = fix_bold_colons(feishu_body)
                         
                         # body = convert_markdown_tables_to_lark(body)
                         success, err = update_feishu_doc(doc_id, feishu_body)
@@ -727,6 +744,9 @@ def sync_all(direction: str = "bidirectional") -> int:
                         # 转换飞书高亮块为 Markdown Alerts
                         log(f"正在转换高亮块格式...")
                         content = convert_callouts_to_markdown_alerts(content)
+
+                        # 转换 cite/mention-doc 标签为 Markdown 超链接
+                        content = convert_mentions_to_markdown_links(content)
                         
                         # 处理画板/Mermaid 图表
                         log(f"正在处理画板图表...")

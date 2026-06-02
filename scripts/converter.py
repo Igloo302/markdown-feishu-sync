@@ -842,6 +842,47 @@ def process_whiteboards_for_feishu(content: str) -> str:
     return result
 
 
+def convert_mentions_to_markdown_links(content: str) -> str:
+    """将 <mention-doc> 或 <cite> 等标签转换为标准 Markdown 超链接，防止飞书同步时出现格式问题"""
+    # 替换 <mention-doc token="xxx" type="wiki">标题</mention-doc>
+    def replace_mention(match):
+        token = match.group(1)
+        doc_type = match.group(2)
+        title = match.group(3)
+        # 根据 type 决定是 wiki 还是 docx，默认 wiki
+        path_type = "wiki" if doc_type == "wiki" else "docx"
+        return f"[{title}](https://xreal.feishu.cn/{path_type}/{token})"
+
+    pattern_mention = r'<mention-doc\s+token="([^"]+)"\s+type="([^"]+)"[^>]*>(.*?)</mention-doc>'
+    content = re.sub(pattern_mention, replace_mention, content, flags=re.DOTALL)
+
+    # 替换 <cite doc-id="xxx" file-type="wiki" title="标题" ...></cite>
+    def replace_cite(match):
+        doc_id = match.group(1)
+        file_type = match.group(2)
+        title = match.group(3)
+        path_type = "wiki" if file_type == "wiki" else "docx"
+        return f"[{title}](https://xreal.feishu.cn/{path_type}/{doc_id})"
+
+    pattern_cite = r'<cite\s+doc-id="([^"]+)"\s+file-type="([^"]+)"\s+title="([^"]+)"[^>]*>(.*?)</cite>'
+    content = re.sub(pattern_cite, replace_cite, content, flags=re.DOTALL)
+    
+    # 兼容自闭合格式 <cite doc-id="xxx" file-type="wiki" title="标题" />
+    pattern_cite_self_closing = r'<cite\s+doc-id="([^"]+)"\s+file-type="([^"]+)"\s+title="([^"]+)"[^>]*/>'
+    content = re.sub(pattern_cite_self_closing, replace_cite, content, flags=re.DOTALL)
+
+    return content
+
+
+def fix_bold_colons(content: str) -> str:
+    """将 Markdown 加粗语法中包裹在内部的冒号（中英文）移到加粗符号外部，防止飞书解析错误"""
+    # 匹配 **文本：** 或 **文本:**
+    content = re.sub(r'\*\*([^*]+?)([：:])\*\*', r'**\1**\2', content)
+    # 匹配 __文本：__ 或 __文本:__
+    content = re.sub(r'__([^_]+?)([：:])__', r'__\1__\2', content)
+    return content
+
+
 if __name__ == "__main__":
     # 测试
     test_md = """
