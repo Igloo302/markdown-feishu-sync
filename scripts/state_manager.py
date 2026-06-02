@@ -11,7 +11,7 @@ from dataclasses import dataclass, asdict
 import hashlib
 
 
-SYNC_STATE_PATH = Path.home() / ".hermes" / "obsidian-feishu-sync" / "sync_state.json"
+SYNC_STATE_PATH = Path(__file__).resolve().parent.parent / "sync_state.json"
 
 
 @dataclass

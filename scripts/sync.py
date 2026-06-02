@@ -32,8 +32,8 @@ from converter import (
 
 # 默认配置
 OBSIDIAN_VAULT_PATH = Path.home() / "Library" / "Mobile Documents" / "iCloud~md~obsidian" / "Documents" / "ObsidianVault"
-SYNC_STATE_PATH = Path.home() / ".hermes" / "obsidian-feishu-sync" / "sync_state.json"
-CONFIG_DIR = Path.home() / ".hermes" / "obsidian-feishu-sync"
+SYNC_STATE_PATH = Path(__file__).resolve().parent.parent / "sync_state.json"
+CONFIG_DIR = Path(__file__).resolve().parent.parent
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
 # 全局 base_dir（通过 CLI --base-dir 或环境变量设置）

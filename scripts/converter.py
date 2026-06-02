@@ -4,6 +4,7 @@ Markdown 与飞书文档块格式转换工具
 """
 
 import re
+import json
 from typing import Optional, List, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
@@ -303,66 +304,99 @@ def download_feishu_media(token: str, save_dir: Path) -> Optional[Path]:
     return None
 
 
+def get_obsidian_attachment_dir(markdown_dir: Path) -> Optional[Path]:
+    """
+    如果 markdown_dir 在 Obsidian 库中，则根据 .obsidian/app.json 查找附件保存目录。
+    返回附件目录的绝对 Path，如果不在库中则返回 None。
+    """
+    current = markdown_dir.resolve()
+    while current != current.parent:
+        obsidian_dir = current / ".obsidian"
+        if obsidian_dir.is_dir():
+            vault_root = current
+            app_json_path = obsidian_dir / "app.json"
+            attachment_folder = None
+            if app_json_path.is_file():
+                try:
+                    with open(app_json_path, "r", encoding="utf-8") as f:
+                        config = json.load(f)
+                        attachment_folder = config.get("attachmentFolderPath")
+                except Exception as e:
+                    print(f"[WARN] 无法读取 Obsidian 配置文件: {e}")
+            
+            if not attachment_folder:
+                # 默认保存在库根目录
+                return vault_root
+            
+            if attachment_folder.startswith("./") or attachment_folder.startswith("../"):
+                return (markdown_dir / attachment_folder).resolve()
+            return (vault_root / attachment_folder).resolve()
+        current = current.parent
+    return None
+
+
 def process_images_for_obsidian(
     content: str, 
     doc_id: str,
-    obsidian_vault: Path,
+    markdown_dir: Path,
     lark_cli_path: str = "lark-cli"
 ) -> str:
     """
-    处理飞书文档中的图片，下载到 Obsidian attachments 目录
+    处理飞书文档中的图片，根据配置下载并替换为本地相对路径
     
     Args:
         content: 文档内容
         doc_id: 飞书文档 ID
-        obsidian_vault: Obsidian vault 路径
+        markdown_dir: markdown 所在目录
         lark_cli_path: lark-cli 命令路径
     
     Returns:
         处理后的内容（图片链接替换为本地路径）
     """
-    attachments_dir = obsidian_vault / "attachments" / doc_id
+    # 查找 Obsidian 附件配置，找不到则默认保存在当前 md 同级下的 assets 目录
+    obsidian_attachment_dir = get_obsidian_attachment_dir(markdown_dir)
+    if obsidian_attachment_dir:
+        attachments_dir = obsidian_attachment_dir
+    else:
+        attachments_dir = markdown_dir / "assets"
+        
     result = content
+    
+    # 辅助函数：执行图片下载并返回相对路径
+    def handle_image_download(token_or_url: str) -> Optional[str]:
+        if token_or_url.startswith("http"):
+            local_path = download_image(token_or_url, attachments_dir)
+        else:
+            local_path = download_feishu_media(token_or_url, attachments_dir)
+            
+        if local_path:
+            # 计算图片相对于 markdown_dir 的相对路径
+            rel_path = os.path.relpath(local_path, markdown_dir).replace("\\", "/")
+            return rel_path
+        return None
     
     # 1. 提取并处理 HTML 格式的 <image token="..." .../> 标签
     image_tag_pattern = r'<image\s+token="([a-zA-Z0-9_-]+)"[^>]*>(?:</image>)?'
     for match in re.finditer(image_tag_pattern, content):
         full_match = match.group(0)
         token = match.group(1)
-        local_path = download_feishu_media(token, attachments_dir)
-        if local_path:
-            relative_path = f"attachments/{doc_id}/{local_path.name}"
-            new_img = f"![图片]({relative_path})"
+        rel_path = handle_image_download(token)
+        if rel_path:
+            new_img = f"![图片]({rel_path})"
             result = result.replace(full_match, new_img)
             
     # 2. 提取并处理 Markdown 格式的 ![alt](url) 标签
     images = extract_image_urls(result)
     for full_match, alt_text, url in images:
-        if url.startswith("attachments/"):
+        # 如果是本地图片路径（既不是 http，也不符合简单的 feishu token 格式），则跳过
+        if not url.startswith("http") and not re.match(r"^[a-zA-Z0-9_-]+$", url):
             continue
             
-        if url.startswith("http"):
-            local_path = download_image(url, attachments_dir)
-            if local_path:
-                relative_path = f"attachments/{doc_id}/{local_path.name}"
-                new_img = f"![{alt_text}]({relative_path})"
-                result = result.replace(full_match, new_img)
-        else:
-            # 如果看起来是飞书图片 Token (字母数字下滑线且不含点和斜杠)
-            if re.match(r"^[a-zA-Z0-9_-]+$", url):
-                local_path = download_feishu_media(url, attachments_dir)
-                if local_path:
-                    relative_path = f"attachments/{doc_id}/{local_path.name}"
-                    new_img = f"![{alt_text}]({relative_path})"
-                    result = result.replace(full_match, new_img)
-            else:
-                # 尝试直接使用 http 下载
-                local_path = download_image(url, attachments_dir)
-                if local_path:
-                    relative_path = f"attachments/{doc_id}/{local_path.name}"
-                    new_img = f"![{alt_text}]({relative_path})"
-                    result = result.replace(full_match, new_img)
-    
+        rel_path = handle_image_download(url)
+        if rel_path:
+            new_img = f"![{alt_text}]({rel_path})"
+            result = result.replace(full_match, new_img)
+            
     return result
 
 
@@ -435,7 +469,7 @@ def get_image_size(file_path: Path) -> Optional[Tuple[int, int]]:
 
 def process_images_for_feishu(
     content: str,
-    obsidian_vault: Path,
+    markdown_dir: Path,
     doc_id: str,
 ) -> str:
     """
@@ -443,7 +477,7 @@ def process_images_for_feishu(
     
     Args:
         content: 文档内容
-        obsidian_vault: Obsidian vault 路径
+        markdown_dir: markdown 文件所在目录
         doc_id: 飞书文档 ID
     
     Returns:
@@ -463,11 +497,8 @@ def process_images_for_feishu(
         if url.startswith("http"):
             continue
         
-        # 解析本地路径
-        if url.startswith("attachments/"):
-            local_path = obsidian_vault / url
-        else:
-            local_path = obsidian_vault / url
+        # 解析本地路径（相对于 markdown_dir）
+        local_path = (markdown_dir / url).resolve()
         
         if not local_path.exists():
             continue
