@@ -269,18 +269,17 @@ def download_feishu_media(token: str, save_dir: Path) -> Optional[Path]:
     import os
     save_dir.mkdir(parents=True, exist_ok=True)
     save_path = save_dir / f"img_{token}.png"
+    jpg_path = save_dir / f"img_{token}.jpg"
     
     if save_path.exists():
         return save_path
-        
-    # lark-cli 要求输出路径为当前目录下的相对路径
-    rel_path = os.path.relpath(save_path, os.getcwd())
-    if not rel_path.startswith("."):
-        rel_path = "./" + rel_path
+    if jpg_path.exists():
+        return jpg_path
         
     try:
-        cmd = ["lark-cli", "docs", "+media-download", "--token", token, "--output", rel_path, "--overwrite"]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        # 使用 save_dir 作为 cwd，避免 lark-cli 的 "unsafe output path" 限制
+        cmd = ["lark-cli", "docs", "+media-download", "--token", token, "--output", f"./img_{token}.png", "--overwrite"]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, cwd=save_dir)
         if proc.returncode == 0:
             output = proc.stdout.strip()
             try:
