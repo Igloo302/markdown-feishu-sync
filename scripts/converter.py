@@ -735,6 +735,27 @@ def convert_callouts_to_markdown_alerts(content: str) -> str:
     return re.sub(pattern, replace_callout, content, flags=re.DOTALL)
 
 
+def convert_quotes_to_markdown(content: str) -> str:
+    """将飞书 HTML 格式的 <quote-container> 块转换为 standard markdown blockquotes (> )"""
+    pattern = r'<quote-container>(.*?)</quote-container>'
+    
+    def replace_quote(match):
+        body = match.group(1)
+        # 清理多余的前后换行
+        body = body.strip("\n")
+        lines = body.split("\n")
+        
+        formatted_lines = []
+        for line in lines:
+            if line.strip():
+                formatted_lines.append(f"> {line}")
+            else:
+                formatted_lines.append(">")
+        return "\n".join(formatted_lines)
+        
+    return re.sub(pattern, replace_quote, content, flags=re.DOTALL)
+
+
 def convert_markdown_alerts_to_callouts(content: str) -> str:
     """将 GitHub-style markdown alerts 转换为飞书 HTML 格式的 callout 块"""
     lines = content.split("\n")

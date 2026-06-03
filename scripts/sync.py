@@ -28,6 +28,7 @@ from converter import (
     process_whiteboards_for_feishu,
     convert_mentions_to_markdown_links,
     fix_bold_colons,
+    convert_quotes_to_markdown,
 )
 
 # 默认配置
@@ -420,6 +421,10 @@ def sync_from_feishu(url: str, target_path: Optional[str] = None) -> int:
     log(f"正在转换高亮块格式...")
     content = convert_callouts_to_markdown_alerts(content)
 
+    # 转换飞书引用块为 Markdown 引用
+    log(f"正在转换引用格式...")
+    content = convert_quotes_to_markdown(content)
+
     # 转换 cite/mention-doc 标签为 Markdown 超链接
     content = convert_mentions_to_markdown_links(content)
 
@@ -744,6 +749,10 @@ def sync_all(direction: str = "bidirectional") -> int:
                         # 转换飞书高亮块为 Markdown Alerts
                         log(f"正在转换高亮块格式...")
                         content = convert_callouts_to_markdown_alerts(content)
+
+                        # 转换飞书引用块为 Markdown 引用
+                        log(f"正在转换引用格式...")
+                        content = convert_quotes_to_markdown(content)
 
                         # 转换 cite/mention-doc 标签为 Markdown 超链接
                         content = convert_mentions_to_markdown_links(content)
