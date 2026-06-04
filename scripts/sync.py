@@ -199,31 +199,35 @@ def get_feishu_doc_content(doc_id: str) -> tuple[bool, str, str]:
 
 def create_feishu_doc(title: str, content: str, folder_token: Optional[str] = None) -> tuple[bool, str]:
     """创建飞书文档，返回 (成功, 文档ID)"""
-    args = ["docs", "+create", "--title", title]
+    import tempfile
+    # 在当前工作目录下创建临时文件
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", dir=".", delete=False, encoding="utf-8") as f:
+        f.write(content if content else "# " + title)
+        temp_path = f.name
+
+    rel_path = "./" + os.path.basename(temp_path)
+    args = ["docs", "+create", "--title", title, "--markdown", "@" + rel_path]
     if folder_token:
         args.extend(["--folder-token", folder_token])
 
-    success, output = run_lark_command(args)
-    if not success:
-        return False, output
-
-    # 从输出提取文档 ID
-    doc_id_match = re.search(r"doc[_-]?token[=:]\s*([a-zA-Z0-9]+)", output, re.IGNORECASE)
-    if not doc_id_match:
-        doc_id_match = re.search(r"([a-zA-Z0-9]{20,})", output)
-
-    if not doc_id_match:
-        return False, "无法从创建结果中提取文档 ID"
-
-    doc_id = doc_id_match.group(1)
-
-    # 更新文档内容
-    if content:
-        success, err = update_feishu_doc(doc_id, content)
+    try:
+        success, output = run_lark_command(args)
         if not success:
-            return False, f"创建文档成功但内容更新失败: {err}"
+            return False, output
 
-    return True, doc_id
+        # 从输出提取文档 ID
+        doc_id_match = re.search(r"doc[_-]?token[=:]\s*([a-zA-Z0-9]+)", output, re.IGNORECASE)
+        if not doc_id_match:
+            doc_id_match = re.search(r"([a-zA-Z0-9]{20,})", output)
+
+        if not doc_id_match:
+            return False, "无法从创建结果中提取文档 ID"
+
+        doc_id = doc_id_match.group(1)
+        return True, doc_id
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
 
 
 def update_feishu_doc(doc_id: str, content: str) -> tuple[bool, str]:
