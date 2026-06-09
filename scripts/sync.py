@@ -246,6 +246,32 @@ def update_feishu_doc(doc_id: str, content: str, title: Optional[str] = None) ->
         if title:
             cmd.extend(["--new-title", title])
         success, output = run_lark_command(cmd)
+
+        # 如果提供了标题，尝试同步更新可能关联的 Wiki 节点标题
+        if success and title:
+            try:
+                # 尝试获取关联的 Wiki 节点信息
+                wiki_success, wiki_output = run_lark_command([
+                    "wiki", "+node-get", "--node-token", doc_id, "--obj-type", "docx"
+                ])
+                if wiki_success:
+                    import json
+                    json_start = wiki_output.find("{")
+                    if json_start != -1:
+                        wiki_data = json.loads(wiki_output[json_start:])
+                        if wiki_data.get("ok") and "data" in wiki_data:
+                            node_info = wiki_data["data"]
+                            space_id = node_info.get("space_id")
+                            node_token = node_info.get("node_token")
+                            if space_id and node_token:
+                                log(f"检测到关联的 Wiki 节点，正在更新 Wiki 标题: {title}...")
+                                run_lark_command([
+                                    "api", "POST", f"/open-apis/wiki/v2/spaces/{space_id}/nodes/{node_token}/update_title",
+                                    "--data", json.dumps({"title": title})
+                                ])
+            except Exception as wiki_err:
+                log(f"更新 Wiki 节点标题失败 (可忽略): {wiki_err}", "WARNING")
+
         return success, output
     finally:
         if os.path.exists(temp_path):
