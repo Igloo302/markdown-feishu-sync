@@ -1,5 +1,5 @@
 ---
-name: obsidian-feishu-sync
+name: markdown-feishu-sync
 description: 任意 markdown 文件 ↔ 飞书文档双向同步工具
 triggers:
   - 同步.*飞书
