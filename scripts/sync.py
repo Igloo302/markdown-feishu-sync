@@ -230,8 +230,8 @@ def create_feishu_doc(title: str, content: str, folder_token: Optional[str] = No
             os.unlink(temp_path)
 
 
-def update_feishu_doc(doc_id: str, content: str) -> tuple[bool, str]:
-    """更新飞书文档内容"""
+def update_feishu_doc(doc_id: str, content: str, title: Optional[str] = None) -> tuple[bool, str]:
+    """更新飞书文档内容和标题"""
     import tempfile
     # 在当前工作目录下创建临时文件以避开 lark-cli 对绝对路径的安全限制
     with tempfile.NamedTemporaryFile(mode="w", suffix=".md", dir=".", delete=False, encoding="utf-8") as f:
@@ -240,9 +240,12 @@ def update_feishu_doc(doc_id: str, content: str) -> tuple[bool, str]:
 
     rel_path = "./" + os.path.basename(temp_path)
     try:
-        success, output = run_lark_command([
+        cmd = [
             "docs", "+update", "--api-version", "v2", "--doc", doc_id, "--command", "overwrite", "--doc-format", "markdown", "--content", "@" + rel_path
-        ])
+        ]
+        if title:
+            cmd.extend(["--new-title", title])
+        success, output = run_lark_command(cmd)
         return success, output
     finally:
         if os.path.exists(temp_path):
@@ -526,7 +529,7 @@ def sync_to_feishu(file_path: str, create: bool = False, folder_token: Optional[
         # feishu_body = convert_markdown_tables_to_lark(feishu_body)
 
         log(f"正在更新飞书文档: {doc_id}")
-        success, err = update_feishu_doc(doc_id, feishu_body)
+        success, err = update_feishu_doc(doc_id, feishu_body, title)
         if not success:
             log(f"更新飞书文档失败: {err}", "ERROR")
             return 1
@@ -720,15 +723,22 @@ def sync_all(direction: str = "bidirectional") -> int:
                         feishu_body = convert_mentions_to_markdown_links(feishu_body)
                         feishu_body = fix_bold_colons(feishu_body)
                         
+                        # 提取最新标题
+                        doc_title = path.stem
+                        for line in body.split("\n"):
+                            if line.startswith("# "):
+                                doc_title = line[2:].strip()
+                                break
+
                         # body = convert_markdown_tables_to_lark(body)
-                        success, err = update_feishu_doc(doc_id, feishu_body)
+                        success, err = update_feishu_doc(doc_id, feishu_body, doc_title)
                         if success:
                             # Write back the original local body (with local paths) to local file
-                            content_with_fm = write_sync_frontmatter(body, doc_id, feishu_title)
+                            content_with_fm = write_sync_frontmatter(body, doc_id, doc_title)
                             write_markdown_file(path, content_with_fm)
                             state[doc_id] = {
                                 "obsidian_path": str(path),
-                                "feishu_title": feishu_title,
+                                "feishu_title": doc_title,
                                 "last_sync_time": datetime.now(timezone.utc).isoformat(),
                                 "obsidian_hash": compute_hash(content_with_fm),
                                 "feishu_hash": compute_hash(feishu_body),
