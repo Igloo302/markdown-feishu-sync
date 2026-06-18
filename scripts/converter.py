@@ -502,19 +502,20 @@ def process_images_for_feishu(
         if not local_path.exists():
             continue
         
-        # 上传到飞书（使用 lark-cli docs +media-insert）
+        # 上传到飞书（使用 +media-upload，避免 +media-insert 导致图片在末尾重复插入）
         try:
             # lark-cli 要求文件路径为当前目录下的相对路径
             rel_path = os.path.relpath(local_path, os.getcwd())
             if not rel_path.startswith("."):
                 rel_path = "./" + rel_path
             
-            # 先上传图片获取 token
-            cmd = ["lark-cli", "docs", "+media-insert", "--doc", doc_id, "--file", rel_path]
-            size = get_image_size(local_path)
-            if size:
-                width, height = size
-                cmd.extend(["--width", str(width), "--height", str(height)])
+            cmd = [
+                "lark-cli", "docs", "+media-upload",
+                "--doc-id", doc_id,
+                "--parent-node", doc_id,
+                "--parent-type", "docx_image",
+                "--file", rel_path
+            ]
             
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
             

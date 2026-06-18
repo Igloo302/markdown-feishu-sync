@@ -152,6 +152,9 @@ def extract_doc_id(url: str) -> Optional[str]:
         match = re.search(pattern, url)
         if match:
             return match.group(1)
+    # 如果本身就是符合 token 特征的字符串，直接返回
+    if re.match(r"^[a-zA-Z0-9_-]+$", url) and len(url) >= 20:
+        return url
     return None
 
 
@@ -175,10 +178,54 @@ def run_lark_command(args: list) -> tuple[bool, str]:
         return False, str(e)
 
 
+def get_feishu_doc_metadata(doc_id: str) -> tuple[bool, str, int, str]:
+    """获取飞书文档元数据，返回 (成功, 标题, revision_id, 错误信息)"""
+    import time
+    max_retries = 3
+    for attempt in range(max_retries):
+        success, output = run_lark_command([
+            "api", "GET", f"/open-apis/docx/v1/documents/{doc_id}"
+        ])
+        if success:
+            try:
+                json_start = output.find("{")
+                if json_start != -1:
+                    json_str = output[json_start:]
+                    data = json.loads(json_str)
+                    if data.get("code") == 0 and "data" in data and "document" in data["data"]:
+                        doc_info = data["data"]["document"]
+                        title = doc_info.get("title", "未命名文档")
+                        revision_id = doc_info.get("revision_id", -1)
+                        return True, title, revision_id, ""
+                return False, "", -1, f"无法解析元数据响应: {output}"
+            except Exception as e:
+                return False, "", -1, f"解析元数据失败: {str(e)}"
+        
+        # 频率限制自动重试
+        if "99991400" in output or "rate_limit" in output or "frequency limit" in output:
+            if attempt < max_retries - 1:
+                sleep_time = 1.0 * (attempt + 1)
+                log(f"  [提示] 遇到飞书 API 频率限制，等待 {sleep_time} 秒后进行第 {attempt + 2} 次重试... (Doc ID: {doc_id})")
+                time.sleep(sleep_time)
+                continue
+        
+        return False, "", -1, output
+
+
+def update_revision_id_in_state(state: dict, doc_id: str):
+    """从云端拉取最新的 revision_id 并更新到 state 对应的记录里"""
+    meta_success, _, revision_id, _ = get_feishu_doc_metadata(doc_id)
+    if meta_success and revision_id != -1:
+        state[doc_id]["feishu_revision_id"] = revision_id
+    else:
+        if "feishu_revision_id" not in state[doc_id]:
+            state[doc_id]["feishu_revision_id"] = 0
+
+
 def get_feishu_doc_content(doc_id: str) -> tuple[bool, str, str]:
     """获取飞书文档内容，返回 (成功, 标题, 内容)"""
     success, output = run_lark_command([
-        "docs", "+fetch", "--doc", doc_id, "--format", "pretty"
+        "docs", "+fetch", "--api-version", "v2", "--doc", doc_id, "--doc-format", "markdown", "--format", "pretty"
     ])
     if not success:
         return False, "", output
@@ -206,9 +253,14 @@ def create_feishu_doc(title: str, content: str, folder_token: Optional[str] = No
         temp_path = f.name
 
     rel_path = "./" + os.path.basename(temp_path)
-    args = ["docs", "+create", "--title", title, "--markdown", "@" + rel_path]
+    args = [
+        "docs", "+create", 
+        "--api-version", "v2", 
+        "--doc-format", "markdown", 
+        "--content", "@" + rel_path
+    ]
     if folder_token:
-        args.extend(["--folder-token", folder_token])
+        args.extend(["--parent-token", folder_token])
 
     try:
         success, output = run_lark_command(args)
@@ -367,7 +419,13 @@ def write_sync_frontmatter(content: str, doc_id: str, title: str) -> str:
 def is_doc_deleted_error(err_msg: str) -> bool:
     """检查飞书 API 返回的错误是否表明文档已被删除"""
     err_lower = err_msg.lower()
-    return "3380003" in err_msg or "document page has been deleted" in err_lower or "document_not_exist" in err_lower
+    return (
+        "3380003" in err_msg or 
+        "1770003" in err_msg or 
+        "document page has been deleted" in err_lower or 
+        "document_not_exist" in err_lower or 
+        "resource deleted" in err_lower
+    )
 
 
 def remove_sync_metadata_from_file(path: Path) -> bool:
@@ -524,6 +582,7 @@ def sync_from_feishu(url: str, target_path: Optional[str] = None) -> int:
         "feishu_hash": raw_feishu_hash,
         "sync_direction": "bidirectional"
     }
+    update_revision_id_in_state(state, doc_id)
     save_sync_state(state)
 
     log(f"同步成功!")
@@ -636,6 +695,7 @@ def sync_to_feishu(file_path: str, create: bool = False, folder_token: Optional[
         "feishu_hash": compute_hash(feishu_body),
         "sync_direction": "bidirectional"
     }
+    update_revision_id_in_state(state, doc_id)
     save_sync_state(state)
 
     log(f"同步成功!")
@@ -730,148 +790,138 @@ def sync_remove(identifier: str) -> int:
 
 def sync_all(direction: str = "bidirectional") -> int:
     """同步所有已建立关系的文档"""
+    import concurrent.futures
     state = load_sync_state()
 
     if not state:
         log("暂无同步关系")
         return 0
 
-    success_count = 0
-    fail_count = 0
-    updated_paths = []
-    doc_ids_to_remove = []
-
+    # 1. 筛选有效同步文档路径
+    active_jobs = []
     for doc_id, info in state.items():
         stored_path = info.get("obsidian_path", "")
         feishu_title = info.get("feishu_title", "未知")
-
         if not stored_path:
-            log(f"\n  跳过 {doc_id}: 路径为空")
+            log(f"  跳过 {doc_id}: 路径为空")
             continue
-
         path = Path(stored_path)
-
-        # 检查文件是否存在
         if not path.exists():
-            log(f"\n  跳过 {feishu_title}: 文件不存在 {path}")
+            log(f"  跳过 {feishu_title}: 本地文件不存在 {path}")
+            continue
+        active_jobs.append((doc_id, path, feishu_title))
+
+    if not active_jobs:
+        log("无有效同步对象")
+        return 0
+
+    # 2. 多线程并行检测云端最新元数据（获取 revision_id）
+    log(f"正在并行自检 {len(active_jobs)} 个文档的云端状态...")
+    metadata_map = {}
+
+    def fetch_meta(job):
+        d_id, p, t = job
+        success, res_title, revision_id, err_msg = get_feishu_doc_metadata(d_id)
+        return d_id, (success, res_title, revision_id, err_msg)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        results = executor.map(fetch_meta, active_jobs)
+        for doc_id, meta in results:
+            metadata_map[doc_id] = meta
+
+    # 3. 串行处理同步更新与冲突解决
+    success_count = 0
+    fail_count = 0
+    doc_ids_to_remove = []
+
+    for doc_id, path, feishu_title in active_jobs:
+        log(f"\n正在同步: {feishu_title} ({path.name})")
+        meta_success, cloud_title, cloud_revision, err_msg = metadata_map.get(doc_id, (False, "", -1, "获取失败"))
+        info = state.get(doc_id, {})
+
+        if not meta_success:
+            if "3380003" in err_msg or is_doc_deleted_error(err_msg):
+                log(f"  [WARNING] 发现飞书文档已在云端被删除，将自动解除同步关系。 (ID: {doc_id})", "WARNING")
+                remove_sync_metadata_from_file(path)
+                doc_ids_to_remove.append(doc_id)
+                success_count += 1
+                continue
+            log(f"  获取云端元数据失败: {err_msg}", "ERROR")
+            fail_count += 1
             continue
 
-        log(f"\n正在同步: {feishu_title} ({path.name})")
+        success, local_content = read_markdown_file(path)
+        if not success:
+            log(f"  读取本地文件失败: {local_content}", "ERROR")
+            fail_count += 1
+            continue
+
+        local_hash = compute_hash(local_content)
+        old_local_hash = info.get("obsidian_hash", "")
+        old_revision = info.get("feishu_revision_id", -1)
+
+        local_changed = (local_hash != old_local_hash)
+        cloud_changed = (cloud_revision != old_revision)
+
+        # 针对旧版数据迁移的优化：如果本地有修改，但 state 中没有 feishu_revision_id，
+        # 我们拉取一次云端内容比对哈希，以确认云端是否真的有修改，避免误判冲突。
+        if local_changed and old_revision == -1:
+            log(f"  [提示] 检测到本地修改且同步记录中缺失 revision_id，正在验证云端实际状态...")
+            fetch_success, _, cloud_content = get_feishu_doc_content(doc_id)
+            if fetch_success:
+                current_cloud_hash = compute_hash(cloud_content)
+                old_cloud_hash = info.get("feishu_hash", "")
+                if current_cloud_hash == old_cloud_hash:
+                    # 云端实际上没变，不需要拉取，也不算冲突
+                    cloud_changed = False
+                    # 顺便更新一下 state 里的 feishu_revision_id，避免下次重复此检查
+                    info["feishu_revision_id"] = cloud_revision
+                    save_sync_state(state)
+
+        # 校验单向同步限制
+        if direction == "to-feishu":
+            cloud_changed = False
+        elif direction == "to-obsidian":
+            local_changed = False
 
         try:
-            if direction in ["to-feishu", "bidirectional"]:
-                success, content = read_markdown_file(path)
-                if success:
-                    current_hash = compute_hash(content)
-                    old_hash = state.get(doc_id, {}).get("obsidian_hash", "")
-
-                    if current_hash != old_hash:
-                        log(f"  本地有更新，同步到飞书...")
-                        _, body = parse_frontmatter(content)
-                        
-                        # 处理画板/Mermaid 图表
-                        log(f"正在处理画板图表...")
-                        feishu_body = process_whiteboards_for_feishu(body)
-                        
-                        feishu_body = process_images_for_feishu(feishu_body, path.parent, doc_id)
-                        
-                        # 转换 Markdown Alerts 为飞书高亮块
-                        log(f"正在转换高亮块格式...")
-                        feishu_body = convert_markdown_alerts_to_callouts(feishu_body)
-
-                        # 预处理：转换 cite/mention-doc 为 Markdown 超链接，并修复加粗冒号
-                        feishu_body = convert_mentions_to_markdown_links(feishu_body)
-                        feishu_body = fix_bold_colons(feishu_body)
-                        
-                        # 提取最新标题
-                        doc_title = path.stem
-                        for line in body.split("\n"):
-                            if line.startswith("# "):
-                                doc_title = line[2:].strip()
-                                break
-
-                        # body = convert_markdown_tables_to_lark(body)
-                        success, err = update_feishu_doc(doc_id, feishu_body, doc_title)
-                        if success:
-                            # Write back the original local body (with local paths) to local file
-                            content_with_fm = write_sync_frontmatter(body, doc_id, doc_title)
-                            write_markdown_file(path, content_with_fm)
-                            state[doc_id] = {
-                                "obsidian_path": str(path),
-                                "feishu_title": doc_title,
-                                "last_sync_time": datetime.now(timezone.utc).isoformat(),
-                                "obsidian_hash": compute_hash(content_with_fm),
-                                "feishu_hash": compute_hash(feishu_body),
-                                "sync_direction": "bidirectional"
-                            }
-                            success_count += 1
-                        else:
-                            if is_doc_deleted_error(err):
-                                log(f"  [WARNING] 飞书文档 {doc_id} 已在云端被删除，将自动解除同步关系...", "WARNING")
-                                remove_sync_metadata_from_file(path)
-                                doc_ids_to_remove.append(doc_id)
-                                success_count += 1
-                                continue
-                            log(f"  同步失败: {err}", "ERROR")
-                            fail_count += 1
-                            continue
-
-            if direction in ["to-obsidian", "bidirectional"]:
-                if doc_id in doc_ids_to_remove:
-                    continue
-                success, title, content = get_feishu_doc_content(doc_id)
-                if success:
-                    current_hash = compute_hash(content)
-                    old_hash = state.get(doc_id, {}).get("feishu_hash", "")
-
-                    if current_hash != old_hash:
-                        log(f"  飞书有更新，同步到本地...")
-                        content = convert_lark_tables_to_markdown(content)
-                        
-                        # 转换飞书高亮块为 Markdown Alerts
-                        log(f"正在转换高亮块格式...")
-                        content = convert_callouts_to_markdown_alerts(content)
-
-                        # 转换飞书引用块为 Markdown 引用
-                        log(f"正在转换引用格式...")
-                        content = convert_quotes_to_markdown(content)
-
-                        # 转换 cite/mention-doc 标签为 Markdown 超链接
-                        content = convert_mentions_to_markdown_links(content)
-                        
-                        # 处理画板/Mermaid 图表
-                        log(f"正在处理画板图表...")
-                        content = process_whiteboards_for_obsidian(content)
-                        
-                        content = process_images_for_obsidian(content, doc_id, path.parent)
-                        content_with_fm = write_sync_frontmatter(content, doc_id, title)
-                        success, result = write_markdown_file(path, content_with_fm)
-                        if success:
-                            state[doc_id] = {
-                                "obsidian_path": str(path),
-                                "feishu_title": title,
-                                "last_sync_time": datetime.now(timezone.utc).isoformat(),
-                                "obsidian_hash": compute_hash(content_with_fm),
-                                "feishu_hash": current_hash,
-                                "sync_direction": "bidirectional"
-                            }
-                            success_count += 1
-                        else:
-                            log(f"  同步失败: {result}", "ERROR")
-                            fail_count += 1
-                            continue
-                    else:
-                        log(f"  已是最新")
-                else:
-                    if is_doc_deleted_error(content):
-                        log(f"  [WARNING] 飞书文档 {doc_id} 已在云端被删除，将自动解除同步关系...", "WARNING")
-                        remove_sync_metadata_from_file(path)
-                        doc_ids_to_remove.append(doc_id)
-                        success_count += 1
-                        continue
-                    log(f"  同步失败: {content}", "ERROR")
+            if local_changed and cloud_changed:
+                conflict_path = path.with_name(f"{path.stem}.conflict.md")
+                log(f"  [CONFLICT] 检测到双向冲突！本地与飞书云端均有更改。", "WARNING")
+                log(f"            本地内容已备份至: {conflict_path.name}", "WARNING")
+                log(f"            正在拉取飞书云端最新内容覆盖本地主文件...", "WARNING")
+                
+                success_backup, write_err = write_markdown_file(conflict_path, local_content)
+                if not success_backup:
+                    log(f"  [ERROR] 创建冲突备份文件失败: {write_err}", "ERROR")
                     fail_count += 1
                     continue
+                
+                ret = sync_from_feishu(doc_id, str(path))
+                if ret == 0:
+                    success_count += 1
+                    state = load_sync_state()
+                else:
+                    fail_count += 1
+            elif local_changed:
+                log(f"  本地有更新，同步到飞书云端...")
+                ret = sync_to_feishu(str(path))
+                if ret == 0:
+                    success_count += 1
+                    state = load_sync_state()
+                else:
+                    fail_count += 1
+            elif cloud_changed:
+                log(f"  飞书云端有更新，同步到本地...")
+                ret = sync_from_feishu(doc_id, str(path))
+                if ret == 0:
+                    success_count += 1
+                    state = load_sync_state()
+                else:
+                    fail_count += 1
+            else:
+                log(f"  [最新] 本地与飞书云端均无更新，跳过")
+                success_count += 1
 
         except Exception as e:
             log(f"  同步失败: {e}", "ERROR")
