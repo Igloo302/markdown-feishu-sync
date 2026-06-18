@@ -243,8 +243,8 @@ def update_feishu_doc(doc_id: str, content: str, title: Optional[str] = None) ->
         cmd = [
             "docs", "+update", "--api-version", "v2", "--doc", doc_id, "--command", "overwrite", "--doc-format", "markdown", "--content", "@" + rel_path
         ]
-        if title:
-            cmd.extend(["--new-title", title])
+        # Title is automatically updated via the first H1 header in the markdown content.
+        # --new-title is deprecated in the latest lark-cli.
         success, output = run_lark_command(cmd)
 
         # 如果提供了标题，尝试同步更新可能关联的 Wiki 节点标题
@@ -362,6 +362,31 @@ def write_sync_frontmatter(content: str, doc_id: str, title: str) -> str:
         "last_sync": datetime.now(timezone.utc).isoformat()
     }
     return update_frontmatter(content, frontmatter_updates)
+
+
+def is_doc_deleted_error(err_msg: str) -> bool:
+    """检查飞书 API 返回的错误是否表明文档已被删除"""
+    err_lower = err_msg.lower()
+    return "3380003" in err_msg or "document page has been deleted" in err_lower or "document_not_exist" in err_lower
+
+
+def remove_sync_metadata_from_file(path: Path) -> bool:
+    """从本地 Markdown 文件中移除飞书同步的元数据"""
+    success, content = read_markdown_file(path)
+    if not success:
+        return False
+    frontmatter, body = parse_frontmatter(content)
+    
+    removed = False
+    for key in ["feishu_doc_id", "feishu_title", "last_sync"]:
+        if key in frontmatter:
+            del frontmatter[key]
+            removed = True
+            
+    if removed:
+        new_content = write_frontmatter(frontmatter, body)
+        write_markdown_file(path, new_content)
+    return True
 
 
 # ============== 同步关系查找 ==============
@@ -557,6 +582,14 @@ def sync_to_feishu(file_path: str, create: bool = False, folder_token: Optional[
         log(f"正在更新飞书文档: {doc_id}")
         success, err = update_feishu_doc(doc_id, feishu_body, title)
         if not success:
+            if is_doc_deleted_error(err):
+                log(f"[WARNING] 发现飞书文档已在云端被删除，将自动解除同步关系。 (ID: {doc_id})", "WARNING")
+                remove_sync_metadata_from_file(path)
+                if doc_id in state:
+                    del state[doc_id]
+                    save_sync_state(state)
+                log(f"已自动解除本地文件 {path} 与飞书文档的同步关系。")
+                return 0
             log(f"更新飞书文档失败: {err}", "ERROR")
             return 1
     elif create:
@@ -706,6 +739,7 @@ def sync_all(direction: str = "bidirectional") -> int:
     success_count = 0
     fail_count = 0
     updated_paths = []
+    doc_ids_to_remove = []
 
     for doc_id, info in state.items():
         stored_path = info.get("obsidian_path", "")
@@ -772,11 +806,19 @@ def sync_all(direction: str = "bidirectional") -> int:
                             }
                             success_count += 1
                         else:
+                            if is_doc_deleted_error(err):
+                                log(f"  [WARNING] 飞书文档 {doc_id} 已在云端被删除，将自动解除同步关系...", "WARNING")
+                                remove_sync_metadata_from_file(path)
+                                doc_ids_to_remove.append(doc_id)
+                                success_count += 1
+                                continue
                             log(f"  同步失败: {err}", "ERROR")
                             fail_count += 1
                             continue
 
             if direction in ["to-obsidian", "bidirectional"]:
+                if doc_id in doc_ids_to_remove:
+                    continue
                 success, title, content = get_feishu_doc_content(doc_id)
                 if success:
                     current_hash = compute_hash(content)
@@ -818,12 +860,27 @@ def sync_all(direction: str = "bidirectional") -> int:
                             log(f"  同步失败: {result}", "ERROR")
                             fail_count += 1
                             continue
-
-            log(f"  已是最新")
+                    else:
+                        log(f"  已是最新")
+                else:
+                    if is_doc_deleted_error(content):
+                        log(f"  [WARNING] 飞书文档 {doc_id} 已在云端被删除，将自动解除同步关系...", "WARNING")
+                        remove_sync_metadata_from_file(path)
+                        doc_ids_to_remove.append(doc_id)
+                        success_count += 1
+                        continue
+                    log(f"  同步失败: {content}", "ERROR")
+                    fail_count += 1
+                    continue
 
         except Exception as e:
             log(f"  同步失败: {e}", "ERROR")
             fail_count += 1
+
+    if doc_ids_to_remove:
+        for d_id in doc_ids_to_remove:
+            if d_id in state:
+                del state[d_id]
 
     save_sync_state(state)
 
