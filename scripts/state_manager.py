@@ -11,7 +11,16 @@ from dataclasses import dataclass, asdict
 import hashlib
 
 
-SYNC_STATE_PATH = Path(__file__).resolve().parent.parent / "sync_state.json"
+import os
+
+# 使用标准的 ~/.config 路径
+xdg_config = os.environ.get("XDG_CONFIG_HOME")
+if xdg_config:
+    USER_CONFIG_DIR = Path(xdg_config) / "markdown-feishu-sync"
+else:
+    USER_CONFIG_DIR = Path.home() / ".config" / "markdown-feishu-sync"
+
+SYNC_STATE_PATH = USER_CONFIG_DIR / "sync_state.json"
 
 
 @dataclass

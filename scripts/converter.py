@@ -143,8 +143,17 @@ def markdown_table_to_lark_table(md_table: str) -> str:
     row_count = len(rows)
     col_count = max(len(row) for row in rows)
     
-    # 计算列宽（平均分配）
-    col_widths = [200] * col_count  # 默认宽度
+    # 动态计算每列的估算宽度（基于单元格最长字符串的 UTF-8 字节长度）
+    col_widths = []
+    for col_idx in range(col_count):
+        max_len = 0
+        for row in rows:
+            if col_idx < len(row):
+                byte_len = len(row[col_idx].encode('utf-8'))
+                max_len = max(max_len, byte_len)
+        # 每个字节估算占 8px，加上最小宽度 100px，最大限制 600px
+        width = max(100, min(600, max_len * 8))
+        col_widths.append(width)
     col_widths_str = ",".join(map(str, col_widths))
     
     html = f'<lark-table rows="{row_count}" cols="{col_count}" column-widths="{col_widths_str}">\n'
@@ -176,12 +185,13 @@ def convert_lark_tables_to_markdown(content: str) -> str:
 
 def convert_markdown_tables_to_lark(content: str) -> str:
     """将内容中的所有 Markdown 表格转换为飞书表格"""
-    # 匹配 Markdown 表格（以 | 开头的连续行）
-    pattern = r'(\|[^\n]+\|\n)+(\|[-:|]+\|\n)?(\|[^\n]+\|\n)*'
+    # 匹配 Markdown 表格（以 | 开始并以 | 结尾的连续行，无 ReDoS 风险）
+    pattern = r'((?:^|\n))((?:\|[^\n]+\|[ \t]*(?:\n|$))+)'
     
     def replace_table(match):
-        md_table = match.group(0)
-        return markdown_table_to_lark_table(md_table)
+        prefix = match.group(1)
+        md_table = match.group(2)
+        return prefix + markdown_table_to_lark_table(md_table)
     
     return re.sub(pattern, replace_table, content)
 
@@ -214,12 +224,14 @@ def download_image(url: str, save_dir: Path, filename: Optional[str] = None) -> 
         
         # 生成文件名
         if not filename:
-            # 从 URL 提取扩展名
+            # 剥离 URL 中的 query parameters，以保证生成的文件名对于同一张图在不同时间段是幂等的
+            clean_url = url.split("?")[0]
+            # 从 clean URL 提取扩展名
             ext = ".png"
-            if "." in url.split("/")[-1]:
-                ext = "." + url.split(".")[-1].split("?")[0][:4]  # 限制扩展名长度
-            # 用 URL hash 作为文件名
-            url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
+            if "." in clean_url.split("/")[-1]:
+                ext = "." + clean_url.split(".")[-1][:4]  # 限制扩展名长度
+            # 用 clean URL hash 作为文件名
+            url_hash = hashlib.md5(clean_url.encode()).hexdigest()[:12]
             filename = f"img_{url_hash}{ext}"
         
         save_path = save_dir / filename

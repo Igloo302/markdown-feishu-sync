@@ -33,8 +33,17 @@ from converter import (
 
 # 默认配置
 OBSIDIAN_VAULT_PATH = Path.home() / "Library" / "Mobile Documents" / "iCloud~md~obsidian" / "Documents" / "ObsidianVault"
-SYNC_STATE_PATH = Path(__file__).resolve().parent.parent / "sync_state.json"
-CONFIG_DIR = Path(__file__).resolve().parent.parent
+LEGACY_SYNC_STATE_PATH = Path(__file__).resolve().parent.parent / "sync_state.json"
+
+# 使用标准的 ~/.config 路径
+xdg_config = os.environ.get("XDG_CONFIG_HOME")
+if xdg_config:
+    USER_CONFIG_DIR = Path(xdg_config) / "markdown-feishu-sync"
+else:
+    USER_CONFIG_DIR = Path.home() / ".config" / "markdown-feishu-sync"
+
+SYNC_STATE_PATH = USER_CONFIG_DIR / "sync_state.json"
+CONFIG_DIR = USER_CONFIG_DIR
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
 # 全局 base_dir（通过 CLI --base-dir 或环境变量设置）
@@ -93,7 +102,17 @@ def short_path(path: Path, base: Optional[Path] = None) -> str:
 
 
 def load_sync_state() -> dict:
-    """加载同步状态，自动迁移旧版相对路径到绝对路径"""
+    """加载同步状态，自动迁移旧版路径并兼容相对路径到绝对路径"""
+    # 迁移旧版状态文件到标准配置路径
+    if not SYNC_STATE_PATH.exists() and LEGACY_SYNC_STATE_PATH.exists():
+        try:
+            USER_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            import shutil
+            shutil.copy2(LEGACY_SYNC_STATE_PATH, SYNC_STATE_PATH)
+            log(f"已成功将同步状态迁移至标准路径: {SYNC_STATE_PATH}")
+        except Exception as e:
+            log(f"迁移旧版状态文件失败: {e}", "ERROR")
+
     if not SYNC_STATE_PATH.exists():
         return {}
     try:
@@ -160,12 +179,19 @@ def extract_doc_id(url: str) -> Optional[str]:
 
 def run_lark_command(args: list) -> tuple[bool, str]:
     """执行 lark-cli 命令"""
+    # 从环境变量读取超时时间，默认值为 300s
+    timeout_env = os.environ.get("SYNC_TIMEOUT")
+    try:
+        timeout_val = int(timeout_env) if timeout_env else 300
+    except ValueError:
+        timeout_val = 300
+
     try:
         result = subprocess.run(
             ["lark-cli"] + args,
             capture_output=True,
             text=True,
-            timeout=120
+            timeout=timeout_val
         )
         if result.returncode == 0:
             return True, result.stdout
@@ -489,6 +515,9 @@ def scan_directory_for_frontmatter(directory: Path) -> dict:
     log(f"正在扫描 {directory} 中的 {len(md_files)} 个 .md 文件...")
 
     for md_file in md_files:
+        # 跳过冲突备份文件，防止其覆盖正常的同步路径关系
+        if ".conflict." in md_file.name or md_file.name.endswith(".conflict.md"):
+            continue
         try:
             with open(md_file, "r", encoding="utf-8") as f:
                 content = f.read()
@@ -578,7 +607,7 @@ def sync_from_feishu(url: str, target_path: Optional[str] = None) -> int:
         "obsidian_path": str(target),
         "feishu_title": title,
         "last_sync_time": datetime.now(timezone.utc).isoformat(),
-        "obsidian_hash": compute_hash(content_with_frontmatter),
+        "obsidian_hash": compute_hash(content),
         "feishu_hash": raw_feishu_hash,
         "sync_direction": "bidirectional"
     }
@@ -652,8 +681,6 @@ def sync_to_feishu(file_path: str, create: bool = False, folder_token: Optional[
             log(f"更新飞书文档失败: {err}", "ERROR")
             return 1
     elif create:
-        log(f"正在处理图片...")
-        log(f"  注意: 创建新文档时图片上传暂不支持，请在创建后再次同步")
         feishu_body = body
 
         # 处理画板/Mermaid 图表
@@ -676,6 +703,17 @@ def sync_to_feishu(file_path: str, create: bool = False, folder_token: Optional[
         if not success:
             log(f"创建飞书文档失败: {doc_id}", "ERROR")
             return 1
+
+        # 创建成功后，上传本地图片并替换为飞书图片链接
+        log(f"正在处理并上传本地图片到新创建的飞书文档 (ID: {doc_id})...")
+        feishu_body_with_images = process_images_for_feishu(feishu_body, path.parent, doc_id)
+        if feishu_body_with_images != feishu_body:
+            log(f"正在上传图片并更新文档内容...")
+            success_update, err_update = update_feishu_doc(doc_id, feishu_body_with_images, title)
+            if not success_update:
+                log(f"上传图片后更新文档失败: {err_update}", "ERROR")
+            else:
+                feishu_body = feishu_body_with_images
     else:
         log(f"未找到同步关系，使用 --create 创建新文档，或先通过 sync-from-feishu 同步", "ERROR")
         return 1
@@ -691,7 +729,7 @@ def sync_to_feishu(file_path: str, create: bool = False, folder_token: Optional[
         "obsidian_path": str(path),
         "feishu_title": title,
         "last_sync_time": datetime.now(timezone.utc).isoformat(),
-        "obsidian_hash": compute_hash(content_with_frontmatter),
+        "obsidian_hash": compute_hash(body),
         "feishu_hash": compute_hash(feishu_body),
         "sync_direction": "bidirectional"
     }
@@ -837,6 +875,9 @@ def sync_all(direction: str = "bidirectional") -> int:
     for doc_id, path, feishu_title in active_jobs:
         log(f"\n正在同步: {feishu_title} ({path.name})")
         meta_success, cloud_title, cloud_revision, err_msg = metadata_map.get(doc_id, (False, "", -1, "获取失败"))
+        
+        # 每次循环开始时重新读取最新状态，避免竞态覆盖
+        state = load_sync_state()
         info = state.get(doc_id, {})
 
         if not meta_success:
@@ -856,7 +897,8 @@ def sync_all(direction: str = "bidirectional") -> int:
             fail_count += 1
             continue
 
-        local_hash = compute_hash(local_content)
+        _, local_body = parse_frontmatter(local_content)
+        local_hash = compute_hash(local_body)
         old_local_hash = info.get("obsidian_hash", "")
         old_revision = info.get("feishu_revision_id", -1)
 
@@ -886,7 +928,8 @@ def sync_all(direction: str = "bidirectional") -> int:
 
         try:
             if local_changed and cloud_changed:
-                conflict_path = path.with_name(f"{path.stem}.conflict.md")
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                conflict_path = path.with_name(f"{path.stem}.conflict.{timestamp}.md")
                 log(f"  [CONFLICT] 检测到双向冲突！本地与飞书云端均有更改。", "WARNING")
                 log(f"            本地内容已备份至: {conflict_path.name}", "WARNING")
                 log(f"            正在拉取飞书云端最新内容覆盖本地主文件...", "WARNING")
@@ -928,11 +971,14 @@ def sync_all(direction: str = "bidirectional") -> int:
             fail_count += 1
 
     if doc_ids_to_remove:
+        state = load_sync_state()
         for d_id in doc_ids_to_remove:
             if d_id in state:
                 del state[d_id]
-
-    save_sync_state(state)
+        save_sync_state(state)
+    else:
+        # 确保保存最后的内存状态
+        save_sync_state(state)
 
     log(f"\n同步完成: 成功 {success_count}, 失败 {fail_count}")
     return 0 if fail_count == 0 else 1
@@ -981,7 +1027,7 @@ def sync_repair(directory: Optional[str] = None) -> int:
             success, content = read_markdown_file(Path(md_path))
             if success:
                 _, body = parse_frontmatter(content)
-                obsidian_hash = compute_hash(content)
+                obsidian_hash = compute_hash(body)
                 feishu_hash = compute_hash(body)
             else:
                 obsidian_hash = ""
